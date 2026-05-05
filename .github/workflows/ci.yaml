@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Audit finding M4: cancel superseded runs on the same branch / PR so a
+# rapid-fire push sequence doesn't queue redundant Gradle builds.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Audit finding M4: hard cap on a runaway build (Gradle download stalls,
+    # daemon hangs, etc.). 15 min is comfortably above a normal cold-start.
+    timeout-minutes: 15
+    steps:
+      # Audit finding L5: third-party action versions are a supply-chain risk
+      # via tag-mutation. Pinning to commit SHAs keeps these reproducible.
+      # The comment after each SHA is the human-readable tag at pin time.
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up JDK 11
+        # Toolchain pinned to Java 11 here AND in build.gradle.kts. A bump to
+        # JDK 17 (Jenkins 2.452+ baseline) is tracked as a follow-up issue.
+        uses: actions/setup-java@7a6d8a8234af8eb26422e24e3006232cccaa061b # v4.6.0
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      # Audit finding M5: validate the Gradle wrapper JAR before invoking it.
+      # gradle/actions/wrapper-validation pins the expected SHA-256 of the
+      # bundled gradle-wrapper.jar against the published checksums.
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+
+      - name: Run tests
+        run: ./gradlew --no-daemon test
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: test-reports
+          path: build/reports/tests/
+          if-no-files-found: ignore
