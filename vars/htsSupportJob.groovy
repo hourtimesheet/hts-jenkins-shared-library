@@ -73,10 +73,18 @@ void call(Closure closure) {
       stage('Bootstrap') {
         steps {
           script {
-            // Hoist mutable state to the script binding so it survives Jenkins
-            // controller restarts mid-build (the input step in Confirm can wait
-            // hours). We intentionally avoid env.HTS_SUPPORT_SUBMITTER (cross-
-            // stage env smuggling is brittle and visible to child processes).
+            // Mutable state lives in a script-level Serializable LinkedHashMap.
+            // Restart-survival comes from Jenkins's CPS engine snapshotting
+            // program state at every step boundary (the `input` step in Confirm
+            // can wait hours), NOT from any "hoisting" we do here — Jenkins
+            // re-hydrates the snapshot on controller restart. Keeping the
+            // backing type Serializable is the load-bearing detail; do not
+            // change it to a non-Serializable container, and add an integration
+            // test before refactoring this pattern.
+            //
+            // We intentionally avoid env.HTS_SUPPORT_SUBMITTER (cross-stage env
+            // smuggling is brittle, visible to child processes, and not part
+            // of Jenkins's CPS snapshot).
             _ctxStore.isNoop        = false
             _ctxStore.wasApplied    = false
             _ctxStore.submitter     = env.BUILD_USER ?: 'unknown'
