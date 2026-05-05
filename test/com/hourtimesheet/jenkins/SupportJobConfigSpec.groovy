@@ -39,6 +39,27 @@ class SupportJobConfigSpec extends Specification {
     cfg.fatalMarker   == 'FATAL'
   }
 
+  def "default approverGroup is null (no submitter restriction)"() {
+    expect:
+    new SupportJobConfig().approverGroup == null
+  }
+
+  def "default requireDualApproval is false"() {
+    expect:
+    new SupportJobConfig().requireDualApproval == false
+  }
+
+  def "default confirmTenantName is true (operator must retype slug)"() {
+    expect:
+    new SupportJobConfig().confirmTenantName == true
+  }
+
+  def "default onApply / onFailure hooks are null"() {
+    expect:
+    new SupportJobConfig().onApply == null
+    new SupportJobConfig().onFailure == null
+  }
+
   @Unroll
   def "validate() rejects missing #field"() {
     given:
@@ -67,12 +88,15 @@ class SupportJobConfigSpec extends Specification {
 
     where:
     name << [
-      'A',                // too short + uppercase
+      'A',                // uppercase
       '-acme',            // can't start with hyphen
+      'acme-',            // can't end with hyphen (audit finding H10)
       'acme!',            // special char
       'acme corp',        // space
       'AcmeCorp',         // uppercase
       'a' * 64,           // too long (max 63)
+      'a--b',             // consecutive hyphens (audit finding H10)
+      'acme_x',           // underscore (DNS labels reject; audit finding H10)
     ]
   }
 
@@ -86,7 +110,7 @@ class SupportJobConfigSpec extends Specification {
     cfg.validate() == null
 
     where:
-    name << ['ab', 'acme', 'acme-corp', 'acme123', '0acme', 'a' * 63]
+    name << ['a', 'ab', 'acme', 'acme-corp', 'acme123', '0acme', 'a' * 63, 'a-b-c', '0-1', 'x9-y2-z3']
   }
 
   def "validate() rejects reason shorter than 8 chars"() {
@@ -96,6 +120,43 @@ class SupportJobConfigSpec extends Specification {
 
     expect:
     cfg.validate()?.contains('reason')
+  }
+
+  def "validate() rejects reason longer than 500 chars (audit finding M6)"() {
+    given:
+    def cfg = validConfig()
+    cfg.reason = 'A' * 501
+
+    expect:
+    cfg.validate()?.contains('reason')
+  }
+
+  def "validate() accepts reason at boundary (500 chars)"() {
+    given:
+    def cfg = validConfig()
+    cfg.reason = 'A' * 500
+
+    expect:
+    cfg.validate() == null
+  }
+
+  @Unroll
+  def "validate() rejects reason containing control char '#desc' (audit finding M6)"() {
+    given:
+    def cfg = validConfig()
+    cfg.reason = 'Sales SUPP-1234 ' + ch + ' customer purchased GEP'
+
+    expect:
+    cfg.validate()?.contains('reason')
+
+    where:
+    desc        | ch
+    'newline'   | '\n'
+    'CR'        | '\r'
+    'tab'       | '\t'
+    'NUL'       | '\u0000'
+    'DEL'       | '\u007f'
+    'bell'      | '\u0007'
   }
 
   @Unroll
@@ -129,8 +190,26 @@ class SupportJobConfigSpec extends Specification {
     cfg.validate()?.contains('mongoScriptFile')
   }
 
+  def "validate() rejects backslash in mongoScriptFile (audit finding H2)"() {
+    given:
+    def cfg = validConfig()
+    cfg.mongoScriptFile = 'subdir\\..\\..\\..\\etc\\passwd'
+
+    expect:
+    cfg.validate()?.contains('mongoScriptFile')
+  }
+
+  def "validate() rejects mongoScriptFile with embedded space (audit finding H2)"() {
+    given:
+    def cfg = validConfig()
+    cfg.mongoScriptFile = 'sub dir/script.js'
+
+    expect:
+    cfg.validate()?.contains('mongoScriptFile')
+  }
+
   @Unroll
-  def "validate() rejects extraEnv with reserved key '#k'"() {
+  def "validate() rejects extraEnv with reserved key '#k' (audit finding C2)"() {
     given:
     def cfg = validConfig()
     cfg.extraEnv = [(k): 'whatever']
@@ -139,7 +218,15 @@ class SupportJobConfigSpec extends Specification {
     cfg.validate()?.contains('reserved')
 
     where:
-    k << ['COMPANY_NAME', 'APPLY', 'REASON', 'OPERATOR', 'BUILD_URL', 'MONGO_URI']
+    k << [
+      // Library-set
+      'COMPANY_NAME', 'APPLY', 'REASON', 'OPERATOR', 'MONGO_URI',
+      'HTS_SUPPORT_SCRIPT', 'HTS_SUPPORT_OUT_LOG', 'HTS_CORRELATION_ID',
+      // Jenkins-set
+      'BUILD_URL', 'BUILD_USER', 'WORKSPACE',
+      // Shell / loader keys
+      'PATH', 'HOME', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
+    ]
   }
 
   @Unroll
@@ -155,6 +242,32 @@ class SupportJobConfigSpec extends Specification {
     k << ['lowercase', '1starts-with-digit', 'has space', 'has-hyphen']
   }
 
+  @Unroll
+  def "validate() rejects extraEnv value containing control char '#desc' (audit finding M6)"() {
+    given:
+    def cfg = validConfig()
+    cfg.extraEnv = [EMPLOYEE_NOTE: 'normal' + ch + 'tail']
+
+    expect:
+    cfg.validate()?.contains('EMPLOYEE_NOTE')
+
+    where:
+    desc        | ch
+    'newline'   | '\n'
+    'CR'        | '\r'
+    'tab'       | '\t'
+    'NUL'       | '\u0000'
+  }
+
+  def "validate() rejects null extraEnv value (audit finding M6)"() {
+    given:
+    def cfg = validConfig()
+    cfg.extraEnv = [EMPLOYEE_EMAIL: null]
+
+    expect:
+    cfg.validate()?.contains('EMPLOYEE_EMAIL')
+  }
+
   def "validate() accepts well-formed extraEnv"() {
     given:
     def cfg = validConfig()
@@ -164,7 +277,7 @@ class SupportJobConfigSpec extends Specification {
     cfg.validate() == null
   }
 
-  def "validate() rejects null extraEnv"() {
+  def "validate() rejects null extraEnv map"() {
     given:
     def cfg = validConfig()
     cfg.extraEnv = null
@@ -224,5 +337,33 @@ class SupportJobConfigSpec extends Specification {
   def "config is Serializable so it can survive Jenkins CPS persistence"() {
     expect:
     Serializable.isAssignableFrom(SupportJobConfig)
+  }
+
+  def "RESERVED_EXTRA_ENV_KEYS is non-empty and contains the load-bearing names"() {
+    expect:
+    SupportJobConfig.RESERVED_EXTRA_ENV_KEYS.size() >= 13
+    SupportJobConfig.RESERVED_EXTRA_ENV_KEYS.contains('PATH')
+    SupportJobConfig.RESERVED_EXTRA_ENV_KEYS.contains('LD_PRELOAD')
+    SupportJobConfig.RESERVED_EXTRA_ENV_KEYS.contains('HTS_CORRELATION_ID')
+    SupportJobConfig.RESERVED_EXTRA_ENV_KEYS.contains('HTS_SUPPORT_OUT_LOG')
+  }
+
+  def "RESERVED_EXTRA_ENV_KEYS is immutable (defence-in-depth against runtime mutation)"() {
+    when:
+    SupportJobConfig.RESERVED_EXTRA_ENV_KEYS.add('NEW_KEY')
+
+    then:
+    thrown(UnsupportedOperationException)
+  }
+
+  // ------------------------------------------------------------------
+  // Audit-finding C3: extraValidation removed entirely. Pin its absence.
+  // ------------------------------------------------------------------
+  def "extraValidation field has been removed (audit finding C3)"() {
+    when:
+    new SupportJobConfig().getProperty('extraValidation')
+
+    then:
+    thrown(MissingPropertyException)
   }
 }

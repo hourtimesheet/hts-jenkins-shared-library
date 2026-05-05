@@ -4,10 +4,10 @@ Jenkins shared-library steps for Hour Timesheet's operational support jobs (the
 HK-22xx ticket family and similar).
 
 The library exposes one main step, **`htsSupportJob`**, which factors out the
-common five-stage flow — *validate / dry-run preview / confirm / apply / audit*
-— that every Mongo-backed support job needs. Each ticket's Jenkinsfile shrinks
-from ~280 lines of boilerplate to ~15 lines, and ticket-specific logic lives
-exclusively in a sibling `.mongosh.js`.
+common pipeline — *bootstrap / validate / dry-run preview / confirm / apply /
+audit* — that every Mongo-backed support job needs. Each ticket's Jenkinsfile
+shrinks from ~280 lines of boilerplate to ~15 lines, and ticket-specific logic
+lives exclusively in a sibling `.mongosh.js`.
 
 ---
 
@@ -19,30 +19,67 @@ library:
 | Field                    | Value                                                  |
 | ------------------------ | ------------------------------------------------------ |
 | Name                     | `hts`                                                  |
-| Default version          | `main`                                                 |
+| Default version          | `main` (only during pre-v1 phase — see below)          |
 | Load implicitly          | unchecked                                              |
 | Allow default version override | checked                                          |
 | Retrieval method         | Modern SCM                                             |
 | Source                   | GitHub: `hourtimesheet/hts-jenkins-shared-library`     |
 | Credentials              | A read-only PAT or GitHub App with repo:read           |
 
-Consumer Jenkinsfiles then load the library on the first line:
+### Library-version policy
+
+Pinning a Jenkins shared library to a moving branch is a supply-chain risk: any
+push to `main` rolls out to every running consumer pipeline immediately, with
+no review. We therefore distinguish two phases:
+
+1. **Pre-v1 (today)** — exactly the first **two** consumers (HK-2204 and
+   HK-2205) load the library as `@Library('hts@main') _` so the library and
+   the first two scripts can co-evolve quickly. Every change to the library
+   still goes through the 8-agent ensemble audit; the `main` pin is a tighter
+   feedback loop, not an excuse to skip review.
+2. **Post-v1 (after HK-2205 ships green)** — the repo is tagged `v1.0.0`. From
+   then on every consumer Jenkinsfile loads the library as
+   `@Library('hts@v1') _` (floating major) and PRs may NOT add a third
+   `@main` consumer.
+
+CODEOWNERS + branch protection on `vars/` and `src/` (requiring two reviewers,
+including a security-team member, on every change) are tracked as a follow-up
+issue and SHOULD be in place before the v1.0.0 tag.
 
 ```groovy
+// During pre-v1 (HK-2204, HK-2205 only):
 @Library('hts@main') _
-```
 
-Pin a specific tag (`@Library('hts@v1.2.0') _`) once the library is tagged for
-release; `main` is appropriate during the initial roll-out.
+// Post-v1.0.0 (every other ticket):
+@Library('hts@v1') _
+```
 
 ### Agent prerequisites
 
 Each Jenkins agent that runs a support job needs:
 
-1. `mongosh` ≥ 1.10 on `PATH` ([install guide](https://www.mongodb.com/docs/mongodb-shell/install/)).
-2. Network egress to the prod Mongo cluster.
-3. The Mongo URI registered as a **string** credential (id `hts-mongo-prod-uri`
+1. **`mongosh` ≥ 1.10** on `PATH` ([install guide](https://www.mongodb.com/docs/mongodb-shell/install/)).
+   The library asserts the version at the start of every build and aborts on
+   anything older than 1.10.
+2. **`bash`** on `PATH`. Jenkins's default `sh` step on Debian/Ubuntu agents
+   resolves to `/bin/sh` → `dash`, which does not support `set -o pipefail`.
+   The library's shell helpers all begin with `#!/usr/bin/env bash` so the
+   pipefail/-e/-u guarantees actually hold.
+3. Network egress to the prod Mongo cluster.
+4. The Mongo URI registered as a **string** credential (id `hts-mongo-prod-uri`
    by default — override per job via `credentialId`).
+
+### Required Jenkins plugins
+
+| Plugin                                                                     | Used for                                                              |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [pipeline-model-definition](https://plugins.jenkins.io/pipeline-model-definition/) | Declarative `pipeline { ... }` syntax inside the `vars/` step        |
+| [credentials](https://plugins.jenkins.io/credentials/) + [credentials-binding](https://plugins.jenkins.io/credentials-binding/) | `withCredentials([string(credentialsId:…)])` masking of the Mongo URI |
+| [ansicolor](https://plugins.jenkins.io/ansicolor/)                          | Coloured stage banners in the console                                 |
+| [timestamper](https://plugins.jenkins.io/timestamper/)                      | `timestamps { ... }` wrapper for replayable logs                      |
+| [lockable-resources](https://plugins.jenkins.io/lockable-resources/)        | Per-tenant `lock("hts-support-…")` so two HK-22xx jobs cannot interleave on the same tenant |
+| [ws-cleanup](https://plugins.jenkins.io/ws-cleanup/)                        | `cleanWs` after archiving — keeps the agent workspace from growing per build |
+| [build-user-vars](https://plugins.jenkins.io/build-user-vars-plugin/) (optional) | Populates `BUILD_USER` so the dry-run audit line names a real human  |
 
 ---
 
@@ -51,7 +88,7 @@ Each Jenkins agent that runs a support job needs:
 Every consumer Jenkinsfile follows the same template:
 
 ```groovy
-@Library('hts@main') _
+@Library('hts@main') _   // pre-v1 only; switch to 'hts@v1' after v1.0.0
 
 properties([parameters([
   string(
@@ -77,15 +114,24 @@ htsSupportJob {
   APPLY            = params.APPLY
   reason           = params.reason
   mongoScriptFile  = 'hk-2204-add-gep.mongosh.js'
-  // credentialId   = 'hts-mongo-prod-uri'   // default — override only if needed
-  // extraEnv       = [:]                     // extra env vars passed to mongosh
-  // extraValidation = { cfg -> ... }         // optional consumer-side validation
+  // credentialId       = 'hts-mongo-prod-uri'      // default — override only if needed
+  // extraEnv           = [:]                       // extra env vars passed to mongosh
+  // approverGroup      = 'hts-oncall'              // restrict the apply submitter
+  // requireDualApproval = false                    // require two distinct approvers
+  // confirmTenantName  = true                      // operator must retype the slug (default true)
+  // onApply            = { payload -> /* webhook */ }   // notify on apply success
+  // onFailure          = { payload -> /* webhook */ }   // notify on failure / abort
 }
 ```
 
 > **First run of a new job has empty `params`.** That's expected: the first
 > build registers the parameter inputs in Jenkins and fails validation. The
 > second build picks up the populated params and runs normally.
+
+> Any consumer-side validation belongs in the Jenkinsfile **before** the call
+> to `htsSupportJob {}`. The library deliberately does NOT accept an
+> `extraValidation` closure — capturing a closure that runs hours later (after
+> the input step) is brittle across Jenkins controller restarts.
 
 ---
 
@@ -139,21 +185,36 @@ for apply (`APPLY=true`).
 
 ### Env vars the script can read
 
-| Env var          | Set by                                | Notes                                     |
-| ---------------- | ------------------------------------- | ----------------------------------------- |
-| `COMPANY_NAME`   | `htsSupportJob`                       | Tenant slug, validated by the pipeline.   |
-| `APPLY`          | `htsSupportJob`                       | Literal string `'true'` or `'false'`.     |
-| `REASON`         | `htsSupportJob`                       | The audit reason from the operator.       |
-| `OPERATOR`       | `htsSupportJob`                       | Jenkins `BUILD_USER` (dry-run) or the input-step submitter (apply). |
-| `BUILD_URL`      | Jenkins                               | Provided by Jenkins for free.             |
-| (anything in `extraEnv`) | consumer Jenkinsfile          | E.g. `EMPLOYEE_EMAIL`. Names must match `[A-Z_][A-Z0-9_]*` and not collide with the reserved set above. |
+| Env var               | Set by                                | Notes                                     |
+| --------------------- | ------------------------------------- | ----------------------------------------- |
+| `COMPANY_NAME`        | `htsSupportJob`                       | Tenant slug, validated by the pipeline.   |
+| `APPLY`               | `htsSupportJob`                       | Literal string `'true'` or `'false'`.     |
+| `REASON`              | `htsSupportJob`                       | The audit reason from the operator.       |
+| `OPERATOR`            | `htsSupportJob`                       | Jenkins `BUILD_USER` (dry-run) or the input-step submitter (apply). |
+| `BUILD_URL`           | Jenkins                               | Provided by Jenkins for free.             |
+| `HTS_CORRELATION_ID`  | `htsSupportJob`                       | UUID (or `BUILD_TAG`) tying the Jenkins-side audit log to the Mongo `auditEventLog` row the script writes. **MUST be persisted** to Mongo (see *Auditing*). |
+| `HTS_SUPPORT_SCRIPT`  | `htsSupportJob`                       | Path of THIS script (informational).      |
+| `HTS_SUPPORT_OUT_LOG` | `htsSupportJob`                       | Path of the per-stage tee log (informational). |
+| (anything in `extraEnv`) | consumer Jenkinsfile               | E.g. `EMPLOYEE_EMAIL`. Names must match `[A-Z_][A-Z0-9_]*` and not collide with the reserved set above. |
+
+#### Reserved env-var names (rejected by `extraEnv` validation)
+
+`COMPANY_NAME`, `APPLY`, `REASON`, `OPERATOR`, `MONGO_URI`,
+`HTS_SUPPORT_SCRIPT`, `HTS_SUPPORT_OUT_LOG`, `HTS_CORRELATION_ID`,
+`BUILD_URL`, `BUILD_USER`, `WORKSPACE`,
+`PATH`, `HOME`, `LD_LIBRARY_PATH`, `LD_PRELOAD`.
+
+The shell-loader names (`PATH`, `LD_*`) are reserved so a misconfigured
+consumer cannot redirect mongosh resolution or hijack the process loader.
+`WORKSPACE` and `HTS_SUPPORT_OUT_LOG` are reserved so a consumer cannot trick
+the helper into writing log files outside the workspace.
 
 ### Exit codes
 
 | Code | Meaning                                                |
 | ---- | ------------------------------------------------------ |
 | `0`  | Success — the script ran one of its happy paths (noop, dry-run, applied). |
-| `≠0` | Fatal error. The script SHOULD also print a line containing `FATAL`; the pipeline aborts in either case (`set -eo pipefail`). |
+| `≠0` | Fatal error. The script SHOULD also print a line containing `FATAL`; the pipeline aborts in either case (`set -euo pipefail` under `bash`). |
 
 The pipeline **never swallows non-zero exits**. If `mongosh` exits non-zero,
 the build fails — investigate the artifact log in the Jenkins build page.
@@ -178,6 +239,34 @@ RESULT_JSON={"status":"<status>", ...}
 The pipeline scans the captured log for the configured markers (`noopMarker`,
 `dryRunMarker`, `appliedMarker`, `fatalMarker`) and routes accordingly.
 
+### Apply-time precondition re-check (mandatory)
+
+The dry-run runs ahead of the operator confirmation. Between dry-run and apply
+the operator can wait minutes or hours, and we cannot prove that no other
+process mutated the same documents in the interim — Jenkins's lock is on the
+Jenkins side, not the Mongo side.
+
+**Every `.mongosh.js` MUST therefore re-assert its preconditions inside its
+apply branch**, not just rely on the dry-run check. If the precondition fails
+on apply, exit non-zero with `FATAL` so the pipeline aborts before writing.
+
+```javascript
+// Inside the .mongosh.js apply branch — sketch
+if (APPLY === 'true') {
+  // RE-CHECK preconditions; do not rely on the dry-run.
+  const current = db.masterConfiguration.findOne({ _id: COMPANY_NAME });
+  if (current.modules.PAYROLL === true) {
+    print('RESULT_JSON={"status":"noop","correlationId":"' + HTS_CORRELATION_ID + '"}');
+    exit(0);
+  }
+  if (current.locked === true) {
+    print('FATAL: tenant ' + COMPANY_NAME + ' is locked; refusing to write.');
+    exit(2);
+  }
+  // ... write inside the same withTransaction as the auditEventLog row ...
+}
+```
+
 ### Idempotency
 
 Re-running the same pipeline against the same `companyName` MUST be safe:
@@ -185,17 +274,102 @@ Re-running the same pipeline against the same `companyName` MUST be safe:
 * If the tenant is already in the desired state, the script prints
   `"status":"noop"` and exits 0. The pipeline records `noop: …` in the build
   description and skips the apply stage.
-* The pipeline declares `disableConcurrentBuilds()` to serialize runs of the
-  same job, so two operators clicking "Apply" within seconds of each other
-  cannot race a double-write.
+* The pipeline declares `disableConcurrentBuilds()` to serialise runs of the
+  same job, so two operators clicking "Apply" within seconds of each other on
+  the same Jenkins job cannot race a double-write.
+* The pipeline ALSO acquires a Jenkins `lock("hts-support-${companyName}")`
+  spanning dry-run + confirm + apply, so two DIFFERENT HK-22xx jobs targeting
+  the same tenant cannot interleave between dry-run and apply.
 
 ### Auditing
 
 The `.mongosh.js` writes to `hourtimesheet.auditEventLog` itself (it knows the
-correct `eventType`). The pipeline additionally archives a stamped audit-log
-artifact (`/tmp/<ticketId>-audit.log`) recording the build URL, submitter, and
-status — so you can reconstruct the full history from Jenkins alone if the
-Mongo write fails.
+correct `eventType`). **The audit row MUST be written in the same Mongo
+transaction as the data write** (or via `findAndModify` if a single-document
+update is enough), so a partial commit cannot leave a write without an audit
+row, or vice versa.
+
+```javascript
+// Skeleton — write the audit row in the SAME transaction as the data write.
+const session = db.getMongo().startSession();
+session.startTransaction();
+try {
+  session.getDatabase('hourtimesheet').masterConfiguration.updateOne(
+    { _id: COMPANY_NAME }, { $set: { 'modules.PAYROLL': true } }
+  );
+  session.getDatabase('hourtimesheet').auditEventLog.insertOne({
+    eventType:     'hk-2204-add-gep',
+    companyName:   COMPANY_NAME,
+    operator:      OPERATOR,
+    reason:        REASON,
+    correlationId: HTS_CORRELATION_ID,                          // <-- ties to Jenkins audit log
+    buildUrl:      BUILD_URL,
+    timestamp:     new Date(),
+  });
+  session.commitTransaction();
+} catch (e) {
+  session.abortTransaction();
+  throw e;
+} finally {
+  session.endSession();
+}
+```
+
+The pipeline ALSO writes a Jenkins-side audit artifact (a JSON line under
+`.htsSupportJob/<buildNumber>/<ticketId>-audit.log`) carrying the same
+`correlationId`. Every build's preview / apply / audit logs are archived as
+build artefacts so you can reconstruct the full history from Jenkins alone if
+the Mongo write fails.
+
+---
+
+## Operator-confirmation hardening
+
+The `Confirm` stage's `input` step is the single human gate between a vetted
+dry-run and a real write. Three knobs harden it:
+
+| Field                  | Default | Effect                                                                                                                                                  |
+| ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `confirmTenantName`    | `true`  | The input step adds a `CONFIRM_TENANT_NAME` text field; the apply aborts unless the operator retypes the tenant slug exactly.                            |
+| `approverGroup`        | `null`  | If set, restricts the input step's `submitter:` to the named Jenkins user / group (e.g. `'hts-oncall'`). Anyone else who clicks "Apply" is rejected.     |
+| `requireDualApproval`  | `false` | Adds a SECOND input step that requires a different submitter from the first. The apply aborts if both gates were approved by the same person.            |
+
+Use `requireDualApproval = true` for high-risk tickets (mass updates, deletes,
+financial-impact writes). Single-tenant single-toggle changes can stay on the
+single-approver default.
+
+---
+
+## Notification hooks
+
+`htsSupportJob` does not ship a default Slack/PagerDuty/email integration —
+those are organisation-specific and best handled at the consumer level. Two
+optional hooks fire on success-after-apply and on failure/abort respectively:
+
+```groovy
+htsSupportJob {
+  ticketId        = 'HK-2204'
+  /* ... */
+  onApply = { payload ->
+    // payload keys: ticketId, companyName, submitter, reason, correlationId, buildUrl, status
+    httpRequest(
+        url: env.SLACK_WEBHOOK,
+        httpMode: 'POST',
+        contentType: 'APPLICATION_JSON',
+        requestBody: groovy.json.JsonOutput.toJson([
+            text: "${payload.ticketId} applied for ${payload.companyName} by ${payload.submitter}: ${payload.buildUrl}",
+        ]),
+    )
+  }
+  onFailure = { payload ->
+    // payload.status is one of: 'failed', 'aborted'
+    pagerdutyTrigger(severity: 'error', summary: "${payload.ticketId} ${payload.status}")
+  }
+}
+```
+
+A throwing hook is logged as a `WARN` and does NOT fail the build — failed
+notifications must not roll back a successful write.
 
 ---
 
@@ -224,6 +398,10 @@ Override only if your `.mongosh.js`:
 Don't set markers to overly generic substrings like `"status"` — false matches
 are a silent failure mode.
 
+`.mongosh.js` MUST NEVER print fragments of the connection string (URI
+substrings, hostnames, base64 fragments). Jenkins's credential masking is
+exact-match against the credential value; partial echoes can leak through.
+
 ---
 
 ## Step API
@@ -232,70 +410,129 @@ are a silent failure mode.
 htsSupportJob {
   // --- Required ---
   ticketId         = 'HK-2204'                     // [A-Z0-9][A-Z0-9-]{2,31}; used in log file names & build description
-  companyName      = params.companyName            // tenant slug; [a-z0-9][a-z0-9-]{1,62}
-  reason           = params.reason                 // ≥ 8 chars; recorded in audit log
-  mongoScriptFile  = 'hk-2204-add-gep.mongosh.js'  // relative path inside $WORKSPACE; no '..' or absolute paths
+  companyName      = params.companyName            // tenant slug; [a-z0-9](-?[a-z0-9]){0,62} — no leading/trailing/double hyphens, no underscores
+  reason           = params.reason                 // 8..500 chars, no control chars; recorded in audit log
+  mongoScriptFile  = 'hk-2204-add-gep.mongosh.js'  // relative path inside $WORKSPACE; no '..', leading '/', backslashes, NUL, or spaces
 
   // --- Optional ---
-  APPLY            = params.APPLY                  // boolean, default false (dry-run)
-  credentialId     = 'hts-mongo-prod-uri'          // Jenkins string credential holding the Mongo URI
-  extraEnv         = [:]                           // additional env vars; keys must match [A-Z_][A-Z0-9_]*
-                                                   //   and not collide with reserved names
-                                                   //   (COMPANY_NAME, APPLY, REASON, OPERATOR, BUILD_URL, MONGO_URI)
-  extraValidation  = { cfg -> /* ... */ }          // optional closure; throw to fail validation
+  APPLY                = params.APPLY              // boolean, default false (dry-run)
+  credentialId         = 'hts-mongo-prod-uri'      // Jenkins string credential holding the Mongo URI
+  extraEnv             = [:]                       // additional env vars; keys must match [A-Z_][A-Z0-9_]*, not collide with the
+                                                   //   reserved set, and values must not contain control characters
+  approverGroup        = null                      // optional Jenkins user/group authorised to submit the apply input step
+  requireDualApproval  = false                     // require two distinct approvers
+  confirmTenantName    = true                      // operator must retype tenant slug at the input gate
+  onApply              = null                      // closure invoked on apply success
+  onFailure            = null                      // closure invoked on apply failure / abort
 
   // --- Result-detection markers (override only if your .mongosh.js uses different ones) ---
-  noopMarker       = '"status":"noop"'
-  dryRunMarker     = '"status":"dry-run"'
-  appliedMarker    = '"status":"applied"'
-  fatalMarker      = 'FATAL'
+  noopMarker           = '"status":"noop"'
+  dryRunMarker         = '"status":"dry-run"'
+  appliedMarker        = '"status":"applied"'
+  fatalMarker          = 'FATAL'
 }
 ```
 
 ### Stages
 
-1. **Validate input** — required-fields check, slug regex, reason length,
-   `extraValidation`, plus pre-flight checks for the workspace, the script
-   file, and `mongosh` on `PATH`.
-2. **Dry-run preview** — runs `.mongosh.js` with `APPLY=false`. Aborts on
+1. **Bootstrap** — initialises in-build state (correlation ID, submitter,
+   isNoop / wasApplied flags). Runs first so the rest of the pipeline can
+   reference these without touching `env.*`.
+2. **Validate input** — required-fields check, slug regex, reason length /
+   control chars, plus pre-flight checks: `WORKSPACE` set, script file exists,
+   canonical script path is inside `WORKSPACE` (rejects symlink escape),
+   `mongosh ≥ 1.10` on `PATH`.
+3. **Per-tenant lock** — wraps Dry-run / Confirm / Apply in a Jenkins
+   `lock("hts-support-${companyName}")` so two HK-22xx jobs targeting the same
+   tenant cannot interleave.
+4. **Dry-run preview** — runs `.mongosh.js` with `APPLY=false`. Aborts on
    `fatalMarker`. Sets `currentBuild.description = 'noop: …'` on `noopMarker`,
-   in which case the apply stage is skipped.
-3. **Confirm** — only when `APPLY=true` and the dry-run was not a no-op. Pauses
-   the pipeline for an interactive `input` step with a mandatory
-   `I_HAVE_REVIEWED_THE_PREVIEW` checkbox; captures the submitter for the
-   audit trail.
-4. **Apply** — only when `APPLY=true` and not a no-op. Runs `.mongosh.js` again
-   with `APPLY=true` and `OPERATOR=<submitter>`. Aborts if `appliedMarker` is
-   not in the log.
-5. **Audit** — writes a stamped artifact line (build URL, submitter, status,
-   reason) to `/tmp/<ticketId>-audit.log` regardless of outcome.
+   in which case the apply stage is skipped. 5-minute timeout.
+5. **Confirm** — only when `APPLY=true` and the dry-run was not a no-op.
+   Pauses the pipeline for an interactive `input` step (60-minute timeout)
+   with a mandatory `I_HAVE_REVIEWED_THE_PREVIEW` checkbox, an optional
+   tenant-name retype, optional approver-group restriction, and optional
+   dual-approval second gate. Captures the submitter for the audit trail.
+6. **Apply** — only when `APPLY=true` and not a no-op (15-minute timeout).
+   Runs `.mongosh.js` again with `APPLY=true` and `OPERATOR=<submitter>`.
+   Aborts if `appliedMarker` is not in the log.
+7. **Audit (`post.always`)** — writes a JSON-line audit artefact to
+   `.htsSupportJob/<buildNumber>/<ticketId>-audit.log` REGARDLESS of pipeline
+   outcome (success, failure, abort). The line carries the same
+   `correlationId` the `.mongosh.js` wrote into Mongo's `auditEventLog`.
+8. **Archive (`post.always`)** — `archiveArtifacts` of
+   `.htsSupportJob/<buildNumber>/<ticketId>-*.log` so preview / apply / audit
+   logs are attached to every build, then `cleanWs` clears the workspace
+   subtree so per-build logs don't accumulate on the agent.
 
-`post.always` archives `/tmp/<ticketId>-*.log` so preview / apply / audit logs
-are attached to every build.
+---
+
+## Operations
+
+* **On-call**: support-platform on-call rota (TODO: link to Confluence).
+* **Mongo URI rotation**: stored in Vault path `secret/jenkins/hts-mongo-prod-uri`
+  (TODO: link). Update Vault and re-import the credential in Jenkins.
+* **Audit trail**: every build writes both (a) a Jenkins-side JSON-line audit
+  log to the build artefacts and (b) a Mongo `auditEventLog` row from the
+  `.mongosh.js`. Both share the same `correlationId` for cross-referencing.
+
+### Recovery — apply log shows mongosh exited 0 but no `RESULT_JSON={"status":"applied"...}`
+
+This is a rare but load-bearing case: the pipeline's `appliedMarker` check
+fails the build, but state in Mongo is unknown.
+
+1. **Do NOT re-run with `APPLY=true`** — you'd risk a double-write.
+2. Re-run with `APPLY=false` and the same `companyName`. Read the dry-run
+   output to determine whether the tenant is in the desired state.
+   * If `"status":"noop"` — the original apply succeeded; the missing marker
+     was a script bug. File a follow-up to fix the marker emission.
+   * If `"status":"dry-run"` — the original apply did NOT fully commit.
+     Investigate the apply log + Mongo `auditEventLog` to determine whether
+     the data write happened without the audit row, before re-applying.
+3. Cross-reference the Jenkins-side audit log's `correlationId` against
+   `auditEventLog.find({correlationId: …})`. A row exists ⇔ the
+   `.mongosh.js` reached its commit point.
+
+### Rollback
+
+Most HK-22xx tickets toggle a single field on a single document. To roll back,
+run the inverse ticket (e.g. HK-2204 added GEP; HK-220X removes it). Where no
+inverse ticket exists, write a one-shot `.mongosh.js` against the live URI
+through this same pipeline — never edit Mongo by hand.
 
 ---
 
 ## Security notes
 
 * The Mongo URI is loaded via `withCredentials([string(...)])`, which masks it
-  in the Jenkins console output. The pipeline never echoes `$MONGO_URI`.
+  in the Jenkins console output. The library additionally suppresses xtrace
+  (`{ set +x; } 2>/dev/null`) immediately around the `mongosh` invocation, so
+  the URI is not echoed to the console even if the calling `sh` was invoked
+  with `-x`.
 * Inside the `sh` block the URI is passed to `mongosh` as a double-quoted
   argument — shell-special characters in the URI (semicolons, ampersands,
   dollar signs, spaces) cannot break the command.
-* `set -eo pipefail` and `umask 077` are set on every `sh` block; the
-  preview/apply log files are world-unreadable on the agent.
+* `set -euo pipefail` and `umask 077` are set on every `sh` block via a
+  `#!/usr/bin/env bash` shebang (Jenkins's default `sh` is dash on
+  Debian/Ubuntu, which does not support `pipefail`). The preview/apply log
+  files are world-unreadable on the agent.
 * `mongoScriptFile` is constrained to a relative path inside `$WORKSPACE`
-  (no `..`, no absolute paths) to prevent a misconfigured consumer from
-  pointing the step at an arbitrary file on the agent.
+  (no `..`, no absolute paths, no backslashes, no spaces, no NUL). After the
+  declarative validation, the pipeline ALSO canonicalises the path
+  (`readlink -f`) and rejects scripts whose canonical form falls outside
+  `WORKSPACE` — defending against symlink escape.
+* `extraEnv` rejects keys that would shadow library-set or shell-loader
+  variables (`PATH`, `LD_PRELOAD`, `HTS_SUPPORT_OUT_LOG`, etc.) and rejects
+  values containing control characters.
 
 ---
 
 ## Manual test plan
 
 (For when you're rolling the library out for the first time, before there's a
-green `./gradlew test` run to lean on.)
+green `./gradlew test` run plus a sentinel-tenant smoke job to lean on.)
 
-1. Register the library in Jenkins as above.
+1. Register the library in Jenkins as above and install the required plugins.
 2. Create a Jenkins Pipeline job pointing at a feature branch of
    `hts-company-onboarding-pipeline-script` containing the consumer
    `Jenkinsfile` + `hk-2204-add-gep.mongosh.js`.
@@ -309,31 +546,41 @@ green `./gradlew test` run to lean on.)
    unchecked. Expect: preview log shows `"status":"dry-run"`, build green, no
    apply stage runs.
 6. **Run 4 — apply**: same params as Run 3 but APPLY checked. Expect: pipeline
-   pauses on input, operator confirms, apply log shows `"status":"applied"`,
-   build description `applied: …`, audit-log artifact archived, Mongo
-   `auditEventLog` collection has a new entry.
+   pauses on input, operator confirms (retypes tenant slug), apply log shows
+   `"status":"applied"`, build description `applied: …`, audit-log artefact
+   archived under `.htsSupportJob/<buildNumber>/`, Mongo `auditEventLog`
+   collection has a new entry whose `correlationId` matches the artefact's.
 7. **Run 5 — re-apply (idempotency)**: rerun Run 4 unchanged. Expect:
    `"status":"noop"` in the preview, apply stage skipped.
+8. **Run 6 — wrong tenant name confirmation**: same params as Run 4 but
+   the operator types a different slug at the `CONFIRM_TENANT_NAME` prompt.
+   Expect: pipeline aborts before the apply stage; `post.always` audit log
+   line records `status:"aborted"`.
 
 ---
 
 ## Local development
 
 ```bash
-./gradlew test            # run Spock + JenkinsPipelineUnit suites
-./gradlew check           # test + lint + assemble
+./gradlew test            # run the Spock suite
+./gradlew check           # test + assemble
 ```
 
 The unit suite uses [Spock](https://spockframework.org/) and exercises
 `SupportJobConfig` exhaustively (regex edges, reserved-key collisions, multi-
-error accumulation). Pipeline-shape behaviour — the declarative
-`pipeline { ... }`, `withCredentials`, `input`, `archiveArtifacts` — is
-verified manually in Jenkins (see *Manual test plan* above) because
+error accumulation, control-char rejection in reason / extraEnv values).
+Pipeline-shape behaviour — the declarative `pipeline { ... }`,
+`withCredentials`, `input`, `archiveArtifacts`, the `lock`, the post hooks —
+is verified manually in Jenkins (see *Manual test plan* above) because
 [JenkinsPipelineUnit](https://github.com/jenkinsci/JenkinsPipelineUnit) cannot
 fully evaluate a declarative pipeline today and a half-mocked test would lock
 us into JPU's particular shape. We'll add JPU coverage when JPU's declarative
 support matures or when we factor more logic out of the declarative block into
 plain Groovy methods.
+
+CI runs the same Spock suite under JDK 11 (matching the Jenkins controller
+toolchain) on every push and PR, with the Gradle wrapper JAR validated against
+its published checksum and the Gradle distribution pinned by SHA-256.
 
 ---
 
@@ -342,11 +589,14 @@ plain Groovy methods.
 For each subsequent HK-22xx ticket:
 
 1. Add `<ticket>.mongosh.js` to `hts-company-onboarding-pipeline-script`
-   following the contract above.
+   following the contract above (single-transaction write+audit, idempotent,
+   re-asserts preconditions in the apply branch, persists `HTS_CORRELATION_ID`
+   to the `auditEventLog` row).
 2. Add `<ticket>.groovy` (the Jenkinsfile) — copy the example above and change
    only `ticketId`, `mongoScriptFile`, the parameter help text, and any
-   `extraEnv` / `extraValidation`.
+   `extraEnv`. Inline any consumer-side validation in the Jenkinsfile BEFORE
+   the call to `htsSupportJob {}`.
 3. Register the Pipeline job in Jenkins UI pointing at the new file.
-4. Run the *Manual test plan* steps 3–7.
+4. Run the *Manual test plan* steps 3–8.
 
-That's it. No copy-paste of the five-stage flow.
+That's it. No copy-paste of the validate / dry-run / confirm / apply / audit flow.
