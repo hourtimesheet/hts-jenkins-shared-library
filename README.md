@@ -627,6 +627,24 @@ through this same pipeline — never edit Mongo by hand.
   variables (`PATH`, `LD_PRELOAD`, `HTS_SUPPORT_OUT_LOG`, etc.) and rejects
   values containing control characters.
 
+### Code review
+
+Sensitive paths in this repo (`vars/`, `src/`, `.github/workflows/`,
+`.github/dependabot.yml`) are tagged in [`.github/CODEOWNERS`](.github/CODEOWNERS).
+A change to `vars/` or `src/` is a change to every HK-22xx consumer pipeline
+simultaneously, so every change is intended to require explicit code-owner
+review.
+
+**Out of scope for the CODEOWNERS commit**: enabling branch protection on
+`main` (require PR reviews, require review from Code Owners, require status
+checks to pass) is tracked as a follow-up. It needs org-admin coordination
+because GitHub blocks self-approval and David is currently the sole admin —
+either a second human reviewer with admin rights, a service-account reviewer,
+or an explicit decision to rely on the admin-override workflow is required
+before branch protection can be turned on. Until then, the
+`ensemble-audit-pass` label and audit comment on each PR serve as the review
+artefact.
+
 ---
 
 ## Manual test plan
