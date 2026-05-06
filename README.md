@@ -467,6 +467,16 @@ htsSupportJob {
 
 ---
 
+## Logger API (`vars/log.groovy`)
+
+Lightweight ANSI emitters: `log.info`, `log.debug`, `log.warn`, `log.errorLine`.
+The red-line emitter is `errorLine` (not `error`) so it does not shadow
+Jenkins's built-in `error(String)` step that aborts the build — use
+`log.errorLine(msg)` to emit a red line, and the global `error(msg)` to fail
+the pipeline.
+
+---
+
 ## Operations
 
 * **On-call**: support-platform on-call rota (TODO: link to Confluence).
