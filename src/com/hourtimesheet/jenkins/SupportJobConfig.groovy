@@ -105,6 +105,17 @@ class SupportJobConfig implements Serializable {
    */
   boolean confirmTenantName = true
 
+  /**
+   * If true, the pre-flight stage will accept pre-release {@code mongosh}
+   * builds (e.g. {@code 2.5.0-rc.1}, {@code 2.5.0-beta}, {@code 2.5.0-alpha.2}).
+   * Defaults to {@code false} — operational support jobs should run against
+   * GA shells only; release-candidate driver semantics may differ from GA in
+   * ways that surprise an .mongosh.js (issue #13).
+   *
+   * Opt in only when knowingly testing a candidate build on a non-prod tenant.
+   */
+  boolean allowMongoshPrerelease = false
+
   // --- Notification hooks (audit finding M9) ---
   /**
    * Optional Jenkins-pipeline closure invoked from {@code post.success} after

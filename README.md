@@ -359,6 +359,7 @@ dry-run and a real write. Three knobs harden it:
 | `confirmTenantName`    | `true`  | The input step adds a `CONFIRM_TENANT_NAME` text field; the apply aborts unless the operator retypes the tenant slug exactly.                            |
 | `approverGroup`        | `null`  | If set, restricts the input step's `submitter:` to the named Jenkins user / group (e.g. `'hts-oncall'`). Anyone else who clicks "Apply" is rejected.     |
 | `requireDualApproval`  | `false` | Adds a SECOND input step that requires a different submitter from the first. The apply aborts if both gates were approved by the same person.            |
+| `allowMongoshPrerelease` | `false` | Pre-flight refuses pre-release `mongosh` builds (`-rc.*`, `-beta`, `-alpha.*`) by default — driver semantics may differ from GA. Opt in only on a non-prod tenant when knowingly testing a candidate build (issue #13). |
 
 Use `requireDualApproval = true` for high-risk tickets (mass updates, deletes,
 financial-impact writes). Single-tenant single-toggle changes can stay on the
@@ -448,6 +449,7 @@ htsSupportJob {
   approverGroup        = null                      // optional Jenkins user/group authorised to submit the apply input step
   requireDualApproval  = false                     // require two distinct approvers
   confirmTenantName    = true                      // operator must retype tenant slug at the input gate
+  allowMongoshPrerelease = false                   // accept mongosh pre-release builds (-rc/-beta/-alpha)? default false
   onApply              = null                      // closure invoked on apply success
   onFailure            = null                      // closure invoked on apply failure / abort
 

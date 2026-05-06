@@ -181,12 +181,33 @@ void call(Closure closure) {
                 "(see https://www.mongodb.com/docs/mongodb-shell/install/)."
               )
             }
-            def versionMatch = (mongoshVersion =~ /(\d+)\.(\d+)(?:\.(\d+))?/)
-            if (!versionMatch.find()) {
-              error("Could not parse mongosh version output: '${mongoshVersion}'.")
+            // Issue #13: anchor the regex to a full-line semver. The previous
+            // form `(\d+)\.(\d+)` matched ANYWHERE in ANY line of stdout —
+            // false-positives like `library v1.2.3 built on FOO 9.8` or
+            // `Connection refused at 127.0.0.1` (matching '127.0') would
+            // satisfy the version gate. Strip an optional leading `mongosh `
+            // prefix per the canonical CLI output, then match a strict
+            // full-line semver triple with an optional pre-release tag. Skip
+            // blanks/comments. Pre-releases are rejected unless the consumer
+            // opts in via cfg.allowMongoshPrerelease=true.
+            def parsed = _parseMongoshVersionLines(mongoshVersion)
+            if (parsed == null) {
+              error(
+                "Could not parse mongosh version output. Raw output:\n" +
+                "----\n${mongoshVersion}\n----"
+              )
             }
-            def major = versionMatch.group(1) as int
-            def minor = versionMatch.group(2) as int
+            log.info("mongosh raw:    ${parsed.rawLine}")
+            if (parsed.prerelease && !cfg.allowMongoshPrerelease) {
+              error(
+                "mongosh ${parsed.major}.${parsed.minor}.${parsed.patch}-${parsed.prerelease} " +
+                "is a pre-release build; htsSupportJob refuses pre-releases by default " +
+                "(driver semantics may diverge from GA). Raw line: '${parsed.rawLine}'. " +
+                "Set cfg.allowMongoshPrerelease=true on a non-prod tenant to override."
+              )
+            }
+            def major = parsed.major
+            def minor = parsed.minor
             if (major < 1 || (major == 1 && minor < 10)) {
               error(
                 "mongosh ${major}.${minor} is too old for htsSupportJob. " +
@@ -201,7 +222,7 @@ void call(Closure closure) {
             log.info("Apply:          ${cfg.APPLY}")
             log.info("Script:         ${cfg.mongoScriptFile}")
             log.info("Correlation ID: ${_ctxStore.correlationId}")
-            log.info("mongosh:        ${mongoshVersion.split('\n')[0]}")
+            log.info("mongosh:        ${parsed.rawLine}")
           }
         }
       }
@@ -527,6 +548,60 @@ private String _summaryDescription(SupportJobConfig cfg) {
             : (currentBuild.currentResult == 'SUCCESS' && !cfg.APPLY) ? 'dry-run'
             : (_ctxStore.applyStatus ?: 'aborted')
   return "${status}: ${cfg.ticketId} for ${cfg.companyNameTrimmed}"
+}
+
+/**
+ * Parses {@code mongosh --version} stdout into a structured version triple.
+ *
+ * Issue #13: the previous regex {@code (\d+)\.(\d+)} called via {@code .find()}
+ * matched ANYWHERE in ANY line of stdout, producing false-positives on lines
+ * like {@code library v1.2.3 built on FOO 9.8} or
+ * {@code Connection refused at 127.0.0.1} (matching '127.0').
+ *
+ * This helper:
+ * <ul>
+ *   <li>Iterates over each output line, skipping blanks and {@code #}-comments.</li>
+ *   <li>Strips an optional leading {@code mongosh } prefix (the canonical
+ *       CLI prints {@code mongosh 2.5.0}).</li>
+ *   <li>Matches a strict full-line semver triple with an optional pre-release
+ *       tag: {@code ^v?(\d+)\.(\d+)\.(\d+)(?:-(rc|beta|alpha)\S*)?$}.</li>
+ *   <li>Returns the FIRST matching line as a Map with keys
+ *       {@code rawLine, major, minor, patch, prerelease}; pre-release is null
+ *       for GA. Returns {@code null} when no line matches.</li>
+ * </ul>
+ *
+ * Pre-release rejection (when a tag is found AND
+ * {@code cfg.allowMongoshPrerelease == false}) is the caller's job — this
+ * helper just classifies. Caller logs the {@code rawLine} for forensics
+ * regardless of accept/reject.
+ *
+ * @param raw stdout from {@code mongosh --version}; may be multi-line.
+ * @return Map with keys rawLine/major/minor/patch/prerelease, or null if no
+ *         line is a recognisable semver.
+ */
+private Map _parseMongoshVersionLines(String raw) {
+  if (raw == null) return null
+  def pattern = ~/^v?(\d+)\.(\d+)\.(\d+)(?:-(rc|beta|alpha)(?:\S*)?)?$/
+  for (String line : raw.split('\\r?\\n')) {
+    def trimmed = line?.trim()
+    if (!trimmed) continue
+    if (trimmed.startsWith('#')) continue
+    // Strip the canonical `mongosh ` prefix if present so the regex anchors
+    // on the bare version token. Anything else (driver lines, banners) will
+    // not match the strict full-line semver below.
+    def candidate = trimmed.startsWith('mongosh ') ? trimmed.substring('mongosh '.length()).trim() : trimmed
+    def m = candidate =~ pattern
+    if (m.matches()) {
+      return [
+        rawLine:    trimmed,
+        major:      m.group(1) as int,
+        minor:      m.group(2) as int,
+        patch:      m.group(3) as int,
+        prerelease: m.group(4),  // null if not a pre-release
+      ]
+    }
+  }
+  return null
 }
 
 private String _jsonEncode(Object v) {
