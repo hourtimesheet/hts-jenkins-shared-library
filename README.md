@@ -233,7 +233,7 @@ RESULT_JSON={"status":"<status>", ...}
 | ---------- | ------------------------------------------------------------- |
 | `noop`     | Tenant is already in the desired state. Apply stage is skipped. |
 | `dry-run`  | `APPLY=false` and a write would happen. Pipeline pauses for confirmation. |
-| `applied`  | `APPLY=true` and the write succeeded. Recorded as `applied:` in the build description. |
+| `applied`  | `APPLY=true` and the write succeeded. Recorded in the audit-log JSONL artifact (canonical). |
 | `failed`   | `APPLY=true` but the post-write verify failed. Use exit code `≠0` to abort the pipeline. |
 
 The pipeline scans the captured log for the configured markers (`noopMarker`,
@@ -272,8 +272,8 @@ if (APPLY === 'true') {
 Re-running the same pipeline against the same `companyName` MUST be safe:
 
 * If the tenant is already in the desired state, the script prints
-  `"status":"noop"` and exits 0. The pipeline records `noop: …` in the build
-  description and skips the apply stage.
+  `"status":"noop"` and exits 0. The pipeline records `noop` in the audit-log
+  JSONL artifact (the canonical record) and skips the apply stage.
 * The pipeline declares `disableConcurrentBuilds()` to serialise runs of the
   same job, so two operators clicking "Apply" within seconds of each other on
   the same Jenkins job cannot race a double-write.
@@ -320,6 +320,32 @@ The pipeline ALSO writes a Jenkins-side audit artifact (a JSON line under
 `correlationId`. Every build's preview / apply / audit logs are archived as
 build artefacts so you can reconstruct the full history from Jenkins alone if
 the Mongo write fails.
+
+### Status of truth (issue #14)
+
+The **canonical** sources of truth for what a build did are:
+
+1. The audit-log JSONL artifact at
+   `.htsSupportJob/<buildNumber>/<ticketId>-audit.log` (status, operator,
+   secondary, correlationId, buildResult, timestamp).
+2. The `auditEventLog` row written by the `.mongosh.js` itself, tied 1:1 to
+   the JSONL line via `correlationId`.
+
+`currentBuild.description` is written **once**, in `post.always`, as an
+operator-glance summary string (e.g. `applied: HK-2204 for acme`). It is
+**informational only** and **never read back** by any pipeline code, `when{}`
+clause, or consumer Jenkinsfile. Reasons:
+
+* The Jenkins UI lets users edit a build's description by hand, which would
+  silently desync from canonical state.
+* Plugin upgrades and the Jenkins master can lose the description; the audit-
+  log artifact survives in build artefacts.
+* A failed or interrupted intermediate write (the previous design wrote
+  description twice, at noop-detect and at apply-success) could leave a stale
+  string masking a later failure.
+
+If you find yourself reaching for `currentBuild.description` to make a
+decision, read the audit-log JSONL artifact instead.
 
 ---
 
@@ -446,8 +472,9 @@ htsSupportJob {
    `lock("hts-support-${companyName}")` so two HK-22xx jobs targeting the same
    tenant cannot interleave.
 4. **Dry-run preview** — runs `.mongosh.js` with `APPLY=false`. Aborts on
-   `fatalMarker`. Sets `currentBuild.description = 'noop: …'` on `noopMarker`,
-   in which case the apply stage is skipped. 5-minute timeout.
+   `fatalMarker`. Marks the run as a no-op on `noopMarker` (status recorded in
+   the audit-log JSONL artifact — see "Status of truth"), in which case the
+   apply stage is skipped. 5-minute timeout.
 5. **Confirm** — only when `APPLY=true` and the dry-run was not a no-op.
    Pauses the pipeline for an interactive `input` step (60-minute timeout)
    with a mandatory `I_HAVE_REVIEWED_THE_PREVIEW` checkbox, an optional
@@ -550,16 +577,19 @@ green `./gradlew test` run plus a sentinel-tenant smoke job to lean on.)
    error, parameter inputs registered, build fails red.
 4. **Run 2 — dry-run on a tenant that already has the toggle**: companyName
    set, APPLY unchecked, reason filled. Expect: preview log shows
-   `"status":"noop"`, build description `noop: HK-2204 for <tenant>`, build
-   green, no apply stage runs.
+   `"status":"noop"`, audit-log JSONL artefact records `"status":"noop"`
+   (canonical), end-of-pipeline build description summary `noop: HK-2204 for
+   <tenant>` (informational only), build green, no apply stage runs.
 5. **Run 3 — dry-run on a tenant that does NOT have the toggle**: APPLY still
    unchecked. Expect: preview log shows `"status":"dry-run"`, build green, no
    apply stage runs.
 6. **Run 4 — apply**: same params as Run 3 but APPLY checked. Expect: pipeline
    pauses on input, operator confirms (retypes tenant slug), apply log shows
-   `"status":"applied"`, build description `applied: …`, audit-log artefact
-   archived under `.htsSupportJob/<buildNumber>/`, Mongo `auditEventLog`
-   collection has a new entry whose `correlationId` matches the artefact's.
+   `"status":"applied"`, audit-log JSONL artefact records `"status":"applied"`
+   (canonical), end-of-pipeline build description summary `applied: …`
+   (informational only), audit-log artefact archived under
+   `.htsSupportJob/<buildNumber>/`, Mongo `auditEventLog` collection has a new
+   entry whose `correlationId` matches the artefact's.
 7. **Run 5 — re-apply (idempotency)**: rerun Run 4 unchanged. Expect:
    `"status":"noop"` in the preview, apply stage skipped.
 8. **Run 6 — wrong tenant name confirmation**: same params as Run 4 but

@@ -31,6 +31,17 @@ import com.hourtimesheet.jenkins.SupportJobConfig
  *   - Serializes per-tenant via Jenkins {@code lock("hts-support-${companyName}")}
  *     so two HK-22xx jobs cannot interleave dry-run and apply on the same tenant.
  *
+ * <h2>Status of truth (issue #14)</h2>
+ * The audit-log JSONL artifact ({@code .htsSupportJob/$BUILD_NUMBER/$ticketId-audit.log})
+ * plus Mongo's {@code auditEventLog} row are the <b>canonical</b> sources of
+ * truth for pipeline status (applied / noop / dry-run / failed / aborted).
+ * {@code currentBuild.description} is an <b>informational-only</b> operator-
+ * glance string written exactly once at the end of the pipeline (post.always)
+ * for the Jenkins build-page summary. Never read it back: it can be edited via
+ * the Jenkins UI, can be lost on plugin upgrades, and writes that fail mid-
+ * pipeline could otherwise leave a stale string masking real failures. If you
+ * need to know what happened, read the audit-log artifact.
+ *
  * @param closure DSL closure populating {@link SupportJobConfig}.
  */
 void call(Closure closure) {
@@ -231,6 +242,17 @@ void call(Closure closure) {
           // own auditEventLog write.
           _writeAuditLog(cfg)
 
+          // INFORMATIONAL ONLY: a single operator-glance summary on the build
+          // page. Issue #14 — never read this back; canonical status lives in
+          // the audit-log JSONL artifact and Mongo's auditEventLog. Written
+          // exactly once per build, here in post.always, so a partial pipeline
+          // can't leave a stale "applied:" string masking a real failure.
+          try {
+            currentBuild.description = _summaryDescription(cfg)
+          } catch (Throwable t) {
+            log.warn("currentBuild.description summary failed (non-fatal, informational only): ${t.message}")
+          }
+
           // Build-numbered subdir (audit finding H7) so archiveArtifacts does
           // not re-archive every previous build's logs on every run.
           archiveArtifacts(
@@ -322,7 +344,10 @@ private void _runDryRun(SupportJobConfig cfg) {
     }
     if (text.contains(cfg.noopMarker)) {
       _ctxStore.isNoop = true
-      currentBuild.description = "noop: ${cfg.ticketId} for ${cfg.companyNameTrimmed}"
+      // NOTE: do NOT set currentBuild.description here. The audit-log JSONL
+      // artifact + Mongo auditEventLog row are the canonical sources of truth
+      // for status (issue #14). A single end-of-pipeline summary description
+      // is set in post.always for operator-glance UX.
       log.info("No-op detected — already in desired state. Apply stage will be skipped.")
     } else if (!text.contains(cfg.dryRunMarker)) {
       // Defensive: a script that exited 0 but never printed dryRunMarker
@@ -431,7 +456,10 @@ private void _runApply(SupportJobConfig cfg) {
       }
       _ctxStore.wasApplied = true
       _ctxStore.applyStatus = 'applied'
-      currentBuild.description = "applied: ${cfg.ticketId} for ${cfg.companyNameTrimmed}"
+      // NOTE: do NOT set currentBuild.description here. See the comment in
+      // _runDryRun and the file-level "Status of truth" doc — canonical state
+      // lives in the audit-log JSONL + Mongo auditEventLog (issue #14). A
+      // single end-of-pipeline summary is written in post.always.
     } catch (Throwable t) {
       if (_ctxStore.applyStatus == null) {
         _ctxStore.applyStatus = 'failed'
@@ -482,6 +510,23 @@ private void _writeAuditLog(SupportJobConfig cfg) {
   }
   writeFile(file: auditLog, text: line + "\n")
   log.info("Audit: ${line}")
+}
+
+/**
+ * Builds the single end-of-pipeline {@code currentBuild.description} string.
+ *
+ * <b>Informational only (issue #14).</b> The audit-log JSONL artifact and
+ * Mongo's {@code auditEventLog} are the canonical sources of truth for
+ * pipeline status. Nothing in this codebase (no {@code when{}} clause,
+ * no helper, no consumer Jenkinsfile) reads {@code currentBuild.description}
+ * back; if you find yourself wanting to, read the audit-log artifact instead.
+ */
+private String _summaryDescription(SupportJobConfig cfg) {
+  def status = _ctxStore.wasApplied ? 'applied'
+            : _ctxStore.isNoop      ? 'noop'
+            : (currentBuild.currentResult == 'SUCCESS' && !cfg.APPLY) ? 'dry-run'
+            : (_ctxStore.applyStatus ?: 'aborted')
+  return "${status}: ${cfg.ticketId} for ${cfg.companyNameTrimmed}"
 }
 
 private String _jsonEncode(Object v) {
