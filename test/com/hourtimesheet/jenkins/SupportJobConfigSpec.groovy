@@ -407,4 +407,76 @@ class SupportJobConfigSpec extends Specification {
     then:
     thrown(MissingPropertyException)
   }
+
+  // ------------------------------------------------------------------
+  // Issue #15: dual-approval defense in depth. submitterParameter may
+  // return a display name rather than a userId; approverGroup
+  // constrains the input step's submitter to a known group, narrowing
+  // realm semantics so the runtime fallback path remains safe.
+  // ------------------------------------------------------------------
+  def "validate() rejects requireDualApproval=true when approverGroup is null (issue #15)"() {
+    given:
+    def cfg = validConfig()
+    cfg.requireDualApproval = true
+    // approverGroup left null
+
+    when:
+    def err = cfg.validate()
+
+    then:
+    err != null
+    err.contains('approverGroup')
+    err.contains('requireDualApproval')
+    err.contains('issue #15')
+  }
+
+  def "validate() rejects requireDualApproval=true with blank approverGroup (issue #15)"() {
+    given:
+    def cfg = validConfig()
+    cfg.requireDualApproval = true
+    cfg.approverGroup = '   '
+
+    expect:
+    cfg.validate()?.contains('approverGroup')
+  }
+
+  def "validate() rejects requireDualApproval=true with empty approverGroup (issue #15)"() {
+    given:
+    def cfg = validConfig()
+    cfg.requireDualApproval = true
+    cfg.approverGroup = ''
+
+    expect:
+    cfg.validate()?.contains('approverGroup')
+  }
+
+  def "validate() accepts requireDualApproval=true when approverGroup is set (issue #15)"() {
+    given:
+    def cfg = validConfig()
+    cfg.requireDualApproval = true
+    cfg.approverGroup = 'hts-oncall'
+
+    expect:
+    cfg.validate() == null
+  }
+
+  def "validate() accepts requireDualApproval=false regardless of approverGroup (issue #15)"() {
+    given:
+    def cfg = validConfig()
+    cfg.requireDualApproval = false
+    cfg.approverGroup = null
+
+    expect:
+    cfg.validate() == null
+  }
+
+  def "validate() accepts approverGroup with no dual approval (single-approval path, issue #15)"() {
+    given:
+    def cfg = validConfig()
+    cfg.requireDualApproval = false
+    cfg.approverGroup = 'hts-oncall'
+
+    expect:
+    cfg.validate() == null
+  }
 }
