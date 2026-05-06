@@ -1,0 +1,31 @@
+# CODEOWNERS — required reviewers for sensitive paths
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/managing-your-repositorys-settings-and-security-features/about-code-owners
+#
+# Lines are processed top-to-bottom; the LAST matching pattern wins.
+# Once branch protection is enabled with "Require review from Code Owners",
+# changes to the listed paths will require approval from the listed owners.
+#
+# NOTE: Owners are user-based for now (@DavidAllison) because no
+# `@hourtimesheet/security` team exists yet. When a security team is
+# created, replace these with the team handle.
+
+# Default fallback — catches anything not matched by a more specific rule below.
+# Without this line, files outside the listed paths would require NO review,
+# which defeats the purpose for new top-level files added later.
+*                          @DavidAllison
+
+# Pipeline DSL — loaded by every consumer Jenkinsfile (HK-22xx support jobs).
+# A change here changes every running pipeline simultaneously.
+/vars/                     @DavidAllison
+
+# Production Groovy library code.
+/src/                      @DavidAllison
+
+# CI workflow definitions — control how this repo itself is built/tested.
+/.github/workflows/        @DavidAllison
+
+# Dependency policy.
+/.github/dependabot.yml    @DavidAllison
+
+# CODEOWNERS itself — meta. Changes to ownership rules require owner review.
+/.github/CODEOWNERS        @DavidAllison
