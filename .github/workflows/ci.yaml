@@ -42,10 +42,10 @@ jobs:
       # gradle/actions/wrapper-validation pins the expected SHA-256 of the
       # bundled gradle-wrapper.jar against the published checksums.
       - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+        uses: gradle/actions/wrapper-validation@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
 
       - name: Run tests
         run: ./gradlew --no-daemon test
