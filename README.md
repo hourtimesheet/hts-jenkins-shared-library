@@ -790,7 +790,7 @@ data out of the blast radius of every untested change.
 * **Cleanup cadence**: the support-platform on-call drops collections older
   than 30 days from `hts-jenkins-test` on a weekly Mongo command (tracked in
   the operations runbook). Don't rely on data persisting across runs.
-* **A future enhancement** (deferred follow-up to this issue): give the test
+* **A future enhancement** (deferred follow-up — issue #43): give the test
   tenant its own audit-log collection (`auditEventLog_test`) so even the
   collection name signals "smoke test, not real". Picked up only if the
   current "separate tenant DB" boundary turns out to be insufficient.
