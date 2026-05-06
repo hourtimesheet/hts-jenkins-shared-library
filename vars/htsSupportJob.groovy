@@ -711,7 +711,18 @@ private void _writeAuditLog(SupportJobConfig cfg) {
   def operator = _ctxStore.submitter ?: env.BUILD_USER ?: 'unknown'
   def secondary = _ctxStore.secondSubmitter ?: ''
   // JSON-line format for grep/jq friendliness.
+  //
+  // Issue #8: schema_version is FIRST so consumers can grep for it at column 0
+  // and so visual scanners see the contract version immediately. JSON keys are
+  // technically unordered, but Groovy's LinkedHashMap + the manual encoder
+  // below preserve insertion order, which is the contract downstream tooling
+  // relies on. The integer literal is sourced from
+  // SupportJobConfig.AUDIT_SCHEMA_VERSION so bumping the version is a single-
+  // edit, single-source-of-truth operation; see that constant's javadoc for
+  // the migration policy (when to bump, what counts as breaking). The README
+  // documents the column-0 grep contract for log-shipper / SIEM consumers.
   def fields = [
+      schema_version: SupportJobConfig.AUDIT_SCHEMA_VERSION,
       ticketId:       cfg.ticketId,
       companyName:    cfg.companyNameTrimmed,
       status:         status,

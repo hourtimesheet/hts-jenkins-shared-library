@@ -321,6 +321,79 @@ The pipeline ALSO writes a Jenkins-side audit artifact (a JSON line under
 build artefacts so you can reconstruct the full history from Jenkins alone if
 the Mongo write fails.
 
+#### Audit-log schema (issue #8)
+
+The Jenkins-side audit artifact is a **versioned JSON-line (JSONL) file**:
+
+| Property         | Value                                                                          |
+| ---------------- | ------------------------------------------------------------------------------ |
+| Path             | `.htsSupportJob/${BUILD_NUMBER}/${ticketId}-audit.log`                         |
+| Format           | JSONL — one JSON object per line, UTF-8 encoded, LF-terminated (`\n`)          |
+| Lines per build  | Exactly **one** (written from `post.always` after the lock releases)           |
+| Encoding         | Manual JSON encoder; integer values unquoted, strings escape control chars     |
+
+**Every line is guaranteed to start with `{"schema_version":N,…`** so consumers
+can grep at column 0 and reject unknown major versions.
+
+```json
+{"schema_version":1,"ticketId":"HK-2204","companyName":"acme","status":"applied","buildResult":"SUCCESS","operator":"jdoe","secondary":"","correlationId":"jenkins-HK-2204-42-deadbeef","buildUrl":"https://jenkins.example.com/job/HK-2204/42/","buildNumber":"42","reason":"Sales SUPP-1234 customer purchased GEP","apply":true,"timestamp":"2026-05-05T12:34:56Z"}
+```
+
+##### Required fields (schema_version=1)
+
+| Field            | Type    | Description                                                                              |
+| ---------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `schema_version` | int     | Audit-log schema major version. Currently `1`. Always the FIRST key in the JSON object. |
+| `ticketId`       | string  | Jira-style key, e.g. `HK-2204`. Validated against `[A-Z]{2,6}-[0-9]{2,6}`.               |
+| `companyName`    | string  | Tenant slug (DNS label) — must match `masterConfiguration._id` in Mongo.                 |
+| `status`         | string  | One of: `applied`, `noop`, `dry-run`, `aborted`, `failed`.                               |
+| `buildResult`    | string  | Jenkins's `currentBuild.currentResult` (`SUCCESS`, `FAILURE`, `ABORTED`, `UNSTABLE`).    |
+| `operator`       | string  | Confirm-step submitter (or `BUILD_USER` pre-confirm; `unknown` if neither).              |
+| `secondary`      | string  | Second approver when `requireDualApproval=true`; empty string otherwise.                 |
+| `correlationId`  | string  | Ties this row 1:1 to the Mongo `auditEventLog` row. Format: `BUILD_TAG-BUILD_NUMBER-UUID8`. |
+| `buildUrl`       | string  | Jenkins build URL (empty string if Jenkins did not set `BUILD_URL`).                     |
+| `buildNumber`    | string  | Jenkins's `BUILD_NUMBER` (string, not int — Jenkins sets it as an env-var string).       |
+| `reason`         | string  | Operator-supplied reason from the `reason` parameter (8..500 chars, no control chars).   |
+| `apply`          | boolean | The `APPLY` parameter as supplied to this build (true=apply attempt; false=dry-run).     |
+| `timestamp`      | string  | ISO-8601 UTC instant from `java.time.Instant.now().toString()`. Always ends in `Z`.      |
+
+##### Migration policy
+
+The version is stored as the constant
+`com.hourtimesheet.jenkins.SupportJobConfig.AUDIT_SCHEMA_VERSION`. **Bump it
+when, AND ONLY when, you make a backwards-incompatible change to the row
+shape:**
+
+* a required field is **renamed** or **removed**, OR
+* a required field's **type changes** (string → int, scalar → object), OR
+* the **meaning** of an existing field changes in a way consumers must handle
+  (e.g. enum values, units).
+
+Adding a new **optional** field is a non-breaking change — keep the version,
+document the field as optional in this table.
+
+Adding a new **required** field IS a breaking change for consumers that filter
+on field presence — bump the version.
+
+##### Consumer guidance
+
+Downstream tooling (log shippers, SIEM rules, future ingestion jobs, forensic
+queries) SHOULD:
+
+1. **Reject** unknown major versions — `schema_version > 1` means the row may
+   omit fields you depend on.
+2. **Tolerate** unknown OPTIONAL fields at the current major version — they are
+   backwards-compatible additions.
+3. **Pin** the schema version in any cached extraction logic so a future bump
+   surfaces as a loud parser error rather than a silent data-shape drift.
+
+A minimal `jq` reader for v1:
+
+```bash
+jq -c 'select(.schema_version == 1) | {ticketId, status, correlationId, timestamp}' \
+   .htsSupportJob/*/HK-2204-audit.log
+```
+
 #### Post-apply probe — enforcing the audit-row contract (issue #17)
 
 Pre-#17, the contract that every `RESULT_JSON status=applied` produces
