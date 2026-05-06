@@ -276,10 +276,30 @@ void call(Closure closure) {
 
           // Build-numbered subdir (audit finding H7) so archiveArtifacts does
           // not re-archive every previous build's logs on every run.
-          archiveArtifacts(
-              artifacts: ".htsSupportJob/${env.BUILD_NUMBER}/${cfg.ticketId}-*.log",
-              allowEmptyArchive: true,
-          )
+          //
+          // Issue #12 (N-H1): wrap archiveArtifacts in try/catch so cleanWs
+          // ALWAYS runs. Pre-fix, a transient archive-storage failure (full
+          // disk on master, broken master-agent connection mid-archive, S3
+          // hiccup on a JCasC-configured artifact backend) would throw out of
+          // post.always before cleanWs and leave .htsSupportJob/${BUILD_NUMBER}/
+          // orphaned on the agent — cross-build PII / audit data leakage.
+          //
+          // Catch Throwable (not Exception) so InterruptedException and
+          // sandbox SecurityException variants don't escape. Mark the build
+          // UNSTABLE so the failure is operator-visible without flipping a
+          // successful apply to FAILED — the Mongo auditEventLog row plus the
+          // JSONL audit-log artifact are the canonical record of what the
+          // .mongosh.js did; an archive-side failure should not retroactively
+          // claim the apply itself failed.
+          try {
+            archiveArtifacts(
+                artifacts: ".htsSupportJob/${env.BUILD_NUMBER}/${cfg.ticketId}-*.log",
+                allowEmptyArchive: true,
+            )
+          } catch (Throwable t) {
+            log.errorLine("archiveArtifacts failed but cleanWs must still run (issue #12): ${t.message}")
+            currentBuild.result = 'UNSTABLE'
+          }
           // cleanWs runs AFTER archiveArtifacts; its job is to keep the agent
           // workspace from accumulating across builds, not to pre-empt the archive.
           try {
