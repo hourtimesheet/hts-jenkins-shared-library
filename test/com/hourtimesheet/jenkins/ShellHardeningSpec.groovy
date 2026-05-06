@@ -55,6 +55,21 @@ class ShellHardeningSpec extends Specification {
     src.contains('mongosh "$MONGO_URI"')
   }
 
+  def "vars/htsSupportJob.groovy enforces readPreference=primary via --eval before --file (issue #24)"() {
+    given:
+    def src = shellHelperSource()
+
+    expect: 'mongosh helper sets primary read pref via --eval before executing --file script'
+    src.contains('--eval \'db.getMongo().setReadPref("primary")\'')
+
+    and: '--eval appears before --file so setReadPref applies to the script session'
+    def evalIdx = src.indexOf('--eval')
+    def fileIdx = src.indexOf('--file "$WORKSPACE/$HTS_SUPPORT_SCRIPT"')
+    evalIdx > 0
+    fileIdx > 0
+    evalIdx < fileIdx
+  }
+
   def "vars/htsSupportJob.groovy preserves umask 077 on log files"() {
     given:
     def src = shellHelperSource()
