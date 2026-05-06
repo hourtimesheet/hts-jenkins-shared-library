@@ -51,11 +51,18 @@ class MongoshVersionParserSpec extends Specification {
    */
   private static Map parse(String raw) {
     if (raw == null) return null
+    def knownPrefixes = ['mongosh ', 'Using Mongosh: ', 'Using Mongosh:']
     for (String line : raw.split('\\r?\\n')) {
       def trimmed = line?.trim()
       if (!trimmed) continue
       if (trimmed.startsWith('#')) continue
-      def candidate = trimmed.startsWith('mongosh ') ? trimmed.substring('mongosh '.length()).trim() : trimmed
+      def candidate = trimmed
+      for (String prefix : knownPrefixes) {
+        if (candidate.startsWith(prefix)) {
+          candidate = candidate.substring(prefix.length()).trim()
+          break
+        }
+      }
       def m = candidate =~ VERSION_LINE
       if (m.matches()) {
         return [
@@ -229,6 +236,37 @@ class MongoshVersionParserSpec extends Specification {
     expect: 'the strict full-line anchor blocks these'
     parse('mongosh 2.5.0 (using driver 5.6.0)') == null
     parse('downloaded mongosh 2.5.0') == null
+  }
+
+  def "alternate 'Using Mongosh:' line shape parses (forward compatibility)"() {
+    when: 'mongosh has been observed to emit this form when invoked --nodb'
+    def out = parse('Using Mongosh: 2.0.5')
+
+    then:
+    out != null
+    out.major == 2
+    out.minor == 0
+    out.patch == 5
+    out.prerelease == null
+    out.rawLine == 'Using Mongosh: 2.0.5'
+  }
+
+  def "real-world multi-line where ONLY the 'Using Mongosh:' line carries the version still parses"() {
+    given: 'a hypothetical future build where the bare `mongosh X.Y.Z` line is gone'
+    def raw = [
+      'Using MongoDB:          7.0.5',
+      'Using Mongosh: 2.1.0',
+      '',
+    ].join('\n')
+
+    when:
+    def out = parse(raw)
+
+    then:
+    out != null
+    out.major == 2
+    out.minor == 1
+    out.patch == 0
   }
 
   // --------------------------------------------------------------------

@@ -582,14 +582,23 @@ private String _summaryDescription(SupportJobConfig cfg) {
 private Map _parseMongoshVersionLines(String raw) {
   if (raw == null) return null
   def pattern = ~/^v?(\d+)\.(\d+)\.(\d+)(?:-(rc|beta|alpha)(?:\S*)?)?$/
+  // Recognised line-prefix shapes for known mongosh version output formats.
+  // Anything not matching one of these (driver banners, error lines, build
+  // metadata) falls through to the strict full-line anchor and is rejected.
+  // Order matters only for clarity; each prefix is tried and the rest of the
+  // line must STILL match the strict semver anchor.
+  def knownPrefixes = ['mongosh ', 'Using Mongosh: ', 'Using Mongosh:']
   for (String line : raw.split('\\r?\\n')) {
     def trimmed = line?.trim()
     if (!trimmed) continue
     if (trimmed.startsWith('#')) continue
-    // Strip the canonical `mongosh ` prefix if present so the regex anchors
-    // on the bare version token. Anything else (driver lines, banners) will
-    // not match the strict full-line semver below.
-    def candidate = trimmed.startsWith('mongosh ') ? trimmed.substring('mongosh '.length()).trim() : trimmed
+    def candidate = trimmed
+    for (String prefix : knownPrefixes) {
+      if (candidate.startsWith(prefix)) {
+        candidate = candidate.substring(prefix.length()).trim()
+        break
+      }
+    }
     def m = candidate =~ pattern
     if (m.matches()) {
       return [
