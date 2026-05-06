@@ -1,5 +1,5 @@
 [versions]
-commonLang3 = "3.12.0"
+commonLang3 = "3.20.0"
 # Groovy 3.0.x is the minimum that can compile sources whose dependency JARs
 # are JDK 17 bytecode (class file major 61). The previous 2.5.14 fails with
 # "Unsupported class file major version 61" on jenkins-core 2.440.3 + JDK 17.
