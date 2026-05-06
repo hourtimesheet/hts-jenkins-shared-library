@@ -24,9 +24,10 @@ import java.util.regex.Pattern
  *      and (c) lists it as the FIRST field in the LinkedHashMap so it appears
  *      first in the emitted JSON.
  *   3. <b>Dynamic encoder</b>: reproduce the manual JSON encoder used by
- *      {@code _writeAuditLog} and assert the emitted line literally starts with
- *      {@code {"schema_version":1,...} for a representative field set, and that
- *      the value parses back as integer-1 via a strict regex.
+ *      {@code _writeAuditLog} and assert the emitted line literally starts
+ *      with the bytes {@code "schema_version":1} (preceded by a single
+ *      open-brace) for a representative field set, and that the value parses
+ *      back as integer-1 via a strict regex.
  */
 class AuditSchemaVersionSpec extends Specification {
 
