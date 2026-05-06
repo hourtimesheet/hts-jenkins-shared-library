@@ -1,8 +1,13 @@
 [versions]
 commonLang3 = "3.12.0"
-groovy = "2.5.14"
+# Groovy 3.0.x is the minimum that can compile sources whose dependency JARs
+# are JDK 17 bytecode (class file major 61). The previous 2.5.14 fails with
+# "Unsupported class file major version 61" on jenkins-core 2.440.3 + JDK 17.
+# Spock's matching variant (`2.3-groovy-3.0`) is wire-compatible with the
+# existing Spock specs (no source changes required). Closes #5.
+groovy = "3.0.21"
 jenkin = "2.440.3"
-spock = "2.3-groovy-2.5"
+spock = "2.3-groovy-3.0"
 junit = "5.10.2"
 
 [libraries]
