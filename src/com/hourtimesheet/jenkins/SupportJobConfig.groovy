@@ -116,6 +116,62 @@ class SupportJobConfig implements Serializable {
    */
   boolean allowMongoshPrerelease = false
 
+  // --- Decommission / retirement (issue #10) ---
+  /**
+   * Issue #10: deprecation banner.
+   *
+   * When {@code true}, {@code htsSupportJob} emits a WARN log line at pipeline
+   * start (after Bootstrap) so every operator sees the upcoming retirement
+   * before paging through the dry-run output. Defaults to {@code false} —
+   * deprecation is opt-in per consumer Jenkinsfile.
+   *
+   * Pair with {@link #deprecatedMessage} for a per-ticket migration pointer
+   * (e.g. "HK-22xx jobs are migrating to the platform-tools UI on 2026-08-01").
+   *
+   * The flag is informational ONLY — it does NOT block runs. Use
+   * {@link #freezeAfter} to actually refuse runs after the freeze date.
+   */
+  boolean deprecated = false
+
+  /**
+   * Issue #10: human-readable migration pointer printed alongside the
+   * deprecation banner. When null and {@link #deprecated} is true, a generic
+   * fallback ("This pipeline is deprecated.") is emitted. Set this in every
+   * deprecated consumer Jenkinsfile so operators have a one-line summary of
+   * the migration target / runbook link / retirement date.
+   *
+   * Validation rejects control characters (defence against log-injection;
+   * mirrors the {@link #reason} contract).
+   */
+  String deprecatedMessage = null
+
+  /**
+   * Issue #10: hard freeze date in {@code YYYY-MM-DD} (ISO 8601) form.
+   *
+   * When set, the {@code Apply} stage refuses to run on or after this date —
+   * the {@code input} step still appears (so the operator gets a clear error
+   * message rather than a confusing missing-stage), but submitting it throws
+   * with a freeze message. The dry-run / noop path remains available unless
+   * {@link #freezeBlocksNoop} is also set.
+   *
+   * Comparison uses {@code LocalDate.now(ZoneOffset.UTC)} to avoid Jenkins-
+   * agent-timezone surprises (the same UTC date is observed by every agent
+   * regardless of its TZ).
+   *
+   * Defaults to {@code null} (no freeze).
+   */
+  String freezeAfter = null
+
+  /**
+   * Issue #10: when {@code true} and {@link #freezeAfter} has elapsed, ALSO
+   * block the dry-run / noop path so a retired pipeline can be reduced to
+   * a hard error before the consumer Jenkinsfile is removed entirely.
+   *
+   * Defaults to {@code false} — the noop path stays available after freeze
+   * for last-look forensics (e.g. "did this tenant ever have the toggle?").
+   */
+  boolean freezeBlocksNoop = false
+
   /**
    * Issue #17: post-apply audit-row probe.
    *
@@ -241,6 +297,40 @@ class SupportJobConfig implements Serializable {
     if (!dryRunMarker)  errors << "dryRunMarker must not be empty"
     if (!appliedMarker) errors << "appliedMarker must not be empty"
     if (!fatalMarker)   errors << "fatalMarker must not be empty"
+
+    // Issue #10: decommission story validation.
+    //
+    // freezeAfter is the load-bearing field — bad input here produces a
+    // confusing pipeline error at run time when an operator triggers Apply.
+    // Catch the bad date string at config-construction time so the misconfig
+    // is surfaced on the very first build (validation runs before the lock).
+    if (freezeAfter != null) {
+      def trimmedFreeze = freezeAfter.toString().trim()
+      if (!trimmedFreeze) {
+        errors << "freezeAfter, when set, must be a non-blank ISO date 'YYYY-MM-DD' (got blank)"
+      } else if (!(trimmedFreeze ==~ /\d{4}-\d{2}-\d{2}/)) {
+        errors << "freezeAfter '${freezeAfter}' must be an ISO date 'YYYY-MM-DD' (e.g. '2026-08-01')"
+      } else {
+        // Strict parse — catches '2026-13-01', '2026-02-30', etc. that the
+        // shape regex would otherwise accept.
+        try {
+          java.time.LocalDate.parse(trimmedFreeze)
+        } catch (java.time.format.DateTimeParseException ex) {
+          errors << "freezeAfter '${freezeAfter}' is not a valid calendar date: ${ex.message}"
+        }
+      }
+    }
+    // freezeBlocksNoop=true with no freezeAfter is a footgun — the flag silently
+    // does nothing, masking a retirement misconfiguration. Reject explicitly.
+    if (freezeBlocksNoop && freezeAfter == null) {
+      errors << "freezeBlocksNoop=true requires freezeAfter to be set (issue #10: noop-block has no effect without a freeze date)"
+    }
+    // deprecatedMessage with control chars would log-inject (mirrors reason
+    // contract); be just as strict here so the deprecation banner is safe to
+    // print verbatim.
+    if (deprecatedMessage != null && _containsControlChars(deprecatedMessage.toString())) {
+      errors << "deprecatedMessage must not contain control characters or newlines"
+    }
 
     // Issue #15: dual-approval defense in depth. submitterParameter may return
     // a display name rather than a userId; two accounts sharing a display name

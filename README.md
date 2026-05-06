@@ -509,6 +509,11 @@ htsSupportJob {
   confirmTenantName    = true                      // operator must retype tenant slug at the input gate
   allowMongoshPrerelease = false                   // accept mongosh pre-release builds (-rc/-beta/-alpha)? default false
   skipPostApplyProbe   = false                     // emergency override: skip the issue #17 audit-row probe (Mongo outage only)
+  // Decommission story (issue #10) — used when a support job approaches retirement
+  deprecated           = false                     // emit a WARN banner at pipeline start; informational, does NOT block runs
+  deprecatedMessage    = null                      // optional one-line migration pointer; falls back to a generic banner
+  freezeAfter          = null                      // ISO date 'YYYY-MM-DD'; on/after this date (UTC) the Apply path refuses
+  freezeBlocksNoop     = false                     // when true AND freezeAfter has elapsed, ALSO block dry-run/noop runs
   onApply              = null                      // closure invoked on apply success
   onFailure            = null                      // closure invoked on apply failure / abort
 
@@ -524,7 +529,9 @@ htsSupportJob {
 
 1. **Bootstrap** — initialises in-build state (correlation ID, submitter,
    isNoop / wasApplied flags). Runs first so the rest of the pipeline can
-   reference these without touching `env.*`.
+   reference these without touching `env.*`. When `cfg.deprecated = true`
+   (issue #10), emits a `⚠️ DEPRECATED:` WARN banner here so it's the first
+   thing the operator sees.
 2. **Validate input** — required-fields check, slug regex, reason length /
    control chars, plus pre-flight checks: `WORKSPACE` set, script file exists,
    canonical script path is inside `WORKSPACE` (rejects symlink escape),
@@ -535,19 +542,26 @@ htsSupportJob {
 4. **Dry-run preview** — runs `.mongosh.js` with `APPLY=false`. Aborts on
    `fatalMarker`. Marks the run as a no-op on `noopMarker` (status recorded in
    the audit-log JSONL artifact — see "Status of truth"), in which case the
-   apply stage is skipped. 5-minute timeout.
+   apply stage is skipped. 5-minute timeout. When `cfg.freezeBlocksNoop=true`
+   AND today (UTC) ≥ `cfg.freezeAfter`, the dry-run path also refuses with
+   the freeze message (issue #10).
 5. **Confirm** — only when `APPLY=true` and the dry-run was not a no-op.
    Pauses the pipeline for an interactive `input` step (60-minute timeout)
    with a mandatory `I_HAVE_REVIEWED_THE_PREVIEW` checkbox, an optional
    tenant-name retype, optional approver-group restriction, and optional
    dual-approval second gate. Captures the submitter for the audit trail.
 6. **Apply** — only when `APPLY=true` and not a no-op (15-minute timeout).
-   Runs `.mongosh.js` again with `APPLY=true` and `OPERATOR=<submitter>`.
-   Aborts if `appliedMarker` is not in the log. **After `appliedMarker`
-   passes**, a post-apply probe queries Mongo for an `auditEventLog` row
-   matching the run's `correlationId`; the build fails if exactly one row
-   is not present (issue #17). `cfg.skipPostApplyProbe = true` is an
-   emergency override for Mongo-outage scenarios.
+   When `cfg.freezeAfter` is set AND today (UTC) ≥ that date, the stage
+   throws with `Apply blocked: …` immediately AFTER the operator submits
+   the Confirm input — the input still appears so the operator gets a
+   clear error rather than a silently missing stage (issue #10).
+   Otherwise, runs `.mongosh.js` again with `APPLY=true` and
+   `OPERATOR=<submitter>`. Aborts if `appliedMarker` is not in the log.
+   **After `appliedMarker` passes**, a post-apply probe queries Mongo for
+   an `auditEventLog` row matching the run's `correlationId`; the build
+   fails if exactly one row is not present (issue #17).
+   `cfg.skipPostApplyProbe = true` is an emergency override for Mongo-
+   outage scenarios.
 7. **Audit (`post.always`)** — writes a JSON-line audit artefact to
    `.htsSupportJob/<buildNumber>/<ticketId>-audit.log` REGARDLESS of pipeline
    outcome (success, failure, abort). The line carries the same
@@ -594,6 +608,92 @@ fails the build, but state in Mongo is unknown.
 3. Cross-reference the Jenkins-side audit log's `correlationId` against
    `auditEventLog.find({correlationId: …})`. A row exists ⇔ the
    `.mongosh.js` reached its commit point.
+
+### Decommissioning a support job (issue #10)
+
+Operational support jobs are intentionally short-lived: a ticket lands, the
+toggle is applied across the affected tenants, and after some weeks of "just
+in case" availability the consumer Jenkinsfile should retire. Retiring a job
+hot — deleting the Jenkinsfile, breaking the next operator who tries to
+re-run a known-good fix — is the failure mode this section exists to
+prevent.
+
+Drive every retirement through a four-stage playbook so operators always
+get a clear signal about what they can and cannot do, and never see "stage
+disappeared mysteriously" failures:
+
+1. **T-90 days — flip on the deprecation banner.** In the consumer
+   Jenkinsfile, set:
+
+   ```groovy
+   htsSupportJob {
+     // … existing config …
+     deprecated        = true
+     deprecatedMessage = 'HK-2204 (add GEP) retires on 2026-08-01; use the platform-tools UI instead. See go/hts-retirement.'
+   }
+   ```
+
+   Effect: a `⚠️ DEPRECATED:` log line appears at the top of every build.
+   Runs still work normally. This is the cheapest signal — operators paging
+   through the dry-run output now know retirement is coming.
+
+2. **T-14 days — freeze the Apply path.** Set `freezeAfter` to the
+   retirement date in `YYYY-MM-DD` form (UTC):
+
+   ```groovy
+   freezeAfter = '2026-08-01'
+   ```
+
+   Effect: on or after `2026-08-01` (UTC), the operator can still trigger
+   the build and submit the Apply input, but submission throws with
+   `Apply blocked: HK-2204 is frozen as of 2026-08-01; noop runs still
+   allowed`. Dry-run / noop runs are still permitted so operators can do
+   "did this tenant ever have the toggle?" forensics from the dry-run
+   preview.
+
+3. **T-0 — freeze noop too.** When the dry-run / noop path is no longer
+   useful (e.g. the Mongo schema has already changed under it), set:
+
+   ```groovy
+   freezeBlocksNoop = true
+   ```
+
+   Effect: dry-run / noop runs ALSO fail with the freeze message. The
+   pipeline is now a hard error on every invocation — useful as a
+   tombstone before the file is removed.
+
+4. **T+0 — archive artefacts and remove the job.** Once the freeze message
+   has been visible long enough that operators have stopped triggering it:
+
+   1. Pull the last 90 days of `.htsSupportJob/<n>/<ticketId>-audit.log`
+      JSONL artefacts off the Jenkins agent / archive backend (S3 / NFS /
+      whatever the JCasC artifact store is). Store them in the support
+      team's evidence archive (e.g. a GCS bucket dump) so future forensics
+      can correlate `correlationId` ↔ Mongo `auditEventLog` rows after the
+      Jenkins job is gone. Mongo's `auditEventLog` row is the canonical
+      record (issue #14) but the JSONL adds the Jenkins-side build URL
+      and submitter pair.
+   2. Delete the consumer pipeline's `Jenkinsfile` and `.mongosh.js`.
+   3. Remove the `htsSupportJob { … }` invocation entirely if it's still
+      referenced by another script (it usually isn't — one Jenkinsfile
+      per ticket).
+   4. Remove the Jenkins Pipeline job in the UI (or via JCasC).
+   5. Document the retirement in the operations runbook: the ticket id,
+      the retirement date, the migration target (UI / new pipeline /
+      "no longer applicable"), and the location of the archived audit
+      artefacts.
+
+Why four stages instead of "delete it": every previous out-of-hours operator
+fix has had at least one "we re-ran the old job" recovery path. Removing the
+job without a window where it logs `⚠️ DEPRECATED:` and a window where it
+logs `Apply blocked:` produces a "stage disappeared / Jenkinsfile not found"
+failure mode that's strictly worse than a clear refusal.
+
+All date comparisons run in UTC (`LocalDate.now(ZoneOffset.UTC)`) so a
+freeze date means the same thing on every Jenkins agent regardless of its
+local timezone — see `FreezeGate.isFrozen` in `src/`.
+
+---
 
 ### Rollback
 
