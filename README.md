@@ -752,6 +752,49 @@ artefact.
 (For when you're rolling the library out for the first time, before there's a
 green `./gradlew test` run plus a sentinel-tenant smoke job to lean on.)
 
+### Sentinel test tenant: `hts-jenkins-test`
+
+Every smoke test or shared-library validation run targets the same well-known
+tenant — `hts-jenkins-test` — provisioned in prod Mongo specifically for
+validation. Treating it as the canonical "throwaway" target keeps real customer
+data out of the blast radius of every untested change.
+
+* **Purpose**: a stable tenant for smoke-testing a new pipeline, a shared-
+  library bump, or a candidate `.mongosh.js` against the real prod Mongo
+  cluster — same driver, same indexes, same auth path — without risking real
+  customer data.
+* **How to use** in a consumer Jenkinsfile:
+  1. Trigger a build with `companyName = 'hts-jenkins-test'`.
+  2. Run with `APPLY = false` first; verify the dry-run log shows the expected
+     `"status":"dry-run"` (or `"status":"noop"`) and that the audit-log JSONL
+     artefact records the same.
+  3. Re-run with `APPLY = true`; verify `"status":"applied"` in the apply log,
+     verify the post-apply audit-row probe (issue #17) reports
+     `Audit row VERIFIED ...`, and verify the new `auditEventLog` row in
+     `hts-jenkins-test`'s Mongo namespace.
+  4. Once the smoke run is green end-to-end, repoint the `companyName`
+     parameter at the real customer tenant. Smoke first, prod second.
+* **Sentinel ticketId**: when smoke testing a new fix or library change,
+  prefer ticketId `HK-9999` (any HK-style ID matching the validator regex)
+  and prefix the `reason` text with `[smoke]` so the audit row is trivially
+  filterable.
+* **What's safe**: any `htsSupportJob` build against `hts-jenkins-test` is
+  considered a validation run. Audit rows land in **the test tenant's
+  database**, not a prod customer's — they don't pollute any real customer's
+  `auditEventLog`. A noisy week of smoke testing leaves a noisy
+  `hts-jenkins-test.auditEventLog` and nothing else.
+* **What's not**: do NOT use `hts-jenkins-test` for ad-hoc "let me poke a real
+  field" data-shape exploration. It exists strictly for pipeline smoke
+  testing. Treat its data as ephemeral — anything in it can be wiped without
+  notice.
+* **Cleanup cadence**: the support-platform on-call drops collections older
+  than 30 days from `hts-jenkins-test` on a weekly Mongo command (tracked in
+  the operations runbook). Don't rely on data persisting across runs.
+* **A future enhancement** (deferred follow-up to this issue): give the test
+  tenant its own audit-log collection (`auditEventLog_test`) so even the
+  collection name signals "smoke test, not real". Picked up only if the
+  current "separate tenant DB" boundary turns out to be insufficient.
+
 1. Register the library in Jenkins as above and install the required plugins.
 2. Create a Jenkins Pipeline job pointing at a feature branch of
    `hts-company-onboarding-pipeline-script` containing the consumer
