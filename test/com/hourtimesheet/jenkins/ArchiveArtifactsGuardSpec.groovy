@@ -81,8 +81,14 @@ class ArchiveArtifactsGuardSpec extends Specification {
     given:
     def src = varsSource()
 
-    when:
-    def callSites = (src =~ /(?m)archiveArtifacts\s*\(/).findAll()
+    when: 'count call sites — must be the start of a statement (no whitespace in `archiveArtifacts(`), and the line is not a // comment'
+    // The DSL form is `archiveArtifacts(` with no space; the comment at line 372
+    // says `archiveArtifacts (which uses ...` — note the space. Anchor on
+    // start-of-line + indent + no-space form, and reject lines starting with `//`.
+    def callSites = src.readLines().findAll { line ->
+      def t = line.trim()
+      t.startsWith('archiveArtifacts(') && !t.startsWith('//')
+    }
 
     then: 'one call site only — duplicate would mean a stray pre-fix copy survived'
     callSites.size() == 1
