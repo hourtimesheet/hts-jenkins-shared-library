@@ -495,6 +495,15 @@ private void _runApply(SupportJobConfig cfg) {
           "Investigate before re-running — the .mongosh.js may have written partial state."
         )
       }
+      // Issue #17: enforce the audit-row contract via a post-apply mongosh
+      // probe. Runs ONLY on status=applied (never on noop / dry-run / failed),
+      // and ONLY after the appliedMarker check above passes — so a partial-
+      // write apply that never claimed success cannot be "verified" by this
+      // probe. The probe asserts EXACTLY ONE auditEventLog row with the run's
+      // correlationId; !=1 fails the build with a diagnostic citing the
+      // correlationId. cfg.skipPostApplyProbe=true is an emergency override.
+      _runPostApplyProbe(cfg)
+
       _ctxStore.wasApplied = true
       _ctxStore.applyStatus = 'applied'
       // NOTE: do NOT set currentBuild.description here. See the comment in
@@ -508,6 +517,153 @@ private void _runApply(SupportJobConfig cfg) {
       throw t
     }
   }
+}
+
+/**
+ * Issue #17: post-apply audit-row probe.
+ *
+ * Verifies the audit-row contract that every {@code RESULT_JSON status=applied}
+ * produces EXACTLY ONE {@code auditEventLog} row carrying the run's
+ * {@code correlationId}. Pre-#17 this contract was documentation-only — a
+ * consumer {@code .mongosh.js} that wrote the data but skipped the audit row
+ * (bug, schema typo, network glitch mid-write) reported success while Mongo
+ * silently lacked the forensic record.
+ *
+ * <h3>Probe mechanics</h3>
+ * <ul>
+ *   <li>Runs ONLY when {@code cfg.skipPostApplyProbe == false}. The override
+ *       exists for emergency Mongo-outage scenarios (apply committed, read-
+ *       side primary unreachable) and logs a WARN when used.</li>
+ *   <li>Runs ONLY on {@code status=applied} — never on noop / dry-run /
+ *       failed; the caller invokes {@code _runPostApplyProbe} only after the
+ *       {@code appliedMarker} check passes inside {@link #_runApply}.</li>
+ *   <li>Uses the SAME {@code MONGO_URI} credential as the apply itself (via
+ *       {@code withCredentials}), so the probe sees the same primary the
+ *       apply wrote to.</li>
+ *   <li>Sets {@code db.getMongo().setReadPref("primary")} via {@code --eval}
+ *       BEFORE the count, mirroring the {@link #_runMongosh} hardening
+ *       (issue #24): never read from a stale secondary while verifying a
+ *       just-committed write.</li>
+ *   <li>Passes {@code correlationId} via the {@code MONGOSH_CORR_ID} env var
+ *       and references it inside the eval JS as
+ *       {@code process.env.MONGOSH_CORR_ID} — NEVER interpolates the id into
+ *       the eval string. correlationId is built from BUILD_TAG (issue #16),
+ *       which contains JOB_NAME — partially user-controlled — so any
+ *       string-interpolation path would be a shell / JS injection surface.
+ *       Env-var indirection is the safe pattern.</li>
+ *   <li>Suppresses xtrace via {@code { set +x; } 2>/dev/null} around the
+ *       mongosh invocation (mirrors {@link #_runMongosh}).</li>
+ *   <li>Captures the count via {@code returnStdout: true} and parses an
+ *       integer; non-integer output (mongosh banner leakage, network error)
+ *       trips the regex check and fails with the raw output for forensics.</li>
+ * </ul>
+ *
+ * <h3>Failure modes</h3>
+ * <ul>
+ *   <li>{@code count == 0}: the consumer mongosh.js did NOT write the audit
+ *       row. Build fails with a P1-explicit error citing the correlationId.</li>
+ *   <li>{@code count > 1}: duplicate audit rows for the same correlationId
+ *       (broken consumer). Build fails with a diagnostic.</li>
+ *   <li>{@code count == 1}: contract upheld. Logs INFO with the correlationId
+ *       and returns.</li>
+ *   <li>Probe execution throws (mongosh missing, primary unreachable, malformed
+ *       URI): build fails. Soft-fail would defeat the P1 contract enforcement.
+ *       Operators with a justified reason to bypass set
+ *       {@code cfg.skipPostApplyProbe = true}.</li>
+ * </ul>
+ */
+private void _runPostApplyProbe(SupportJobConfig cfg) {
+  if (cfg.skipPostApplyProbe) {
+    log.warn(
+      "Post-apply audit-row probe SKIPPED for ${cfg.ticketId}/${cfg.companyNameTrimmed} " +
+      "(cfg.skipPostApplyProbe=true). Audit-row contract NOT verified for " +
+      "correlationId=${_ctxStore.correlationId}. Operator must verify the row " +
+      "in Mongo manually before declaring this build complete. (Issue #17.)"
+    )
+    return
+  }
+  def correlationId = _ctxStore.correlationId
+  if (!correlationId) {
+    error(
+      "Post-apply probe: correlationId is unset. This is a library bug — Bootstrap " +
+      "should always set it. Refusing to run the audit-row probe blind."
+    )
+  }
+  String rawOutput
+  try {
+    withCredentials([string(credentialsId: cfg.credentialId, variable: 'MONGO_URI')]) {
+      // correlationId flows in via env var only (NEVER interpolated into the
+      // shell or the --eval JS). Inside the eval we read it via
+      // process.env.MONGOSH_CORR_ID.
+      withEnv(["MONGOSH_CORR_ID=${correlationId}"]) {
+        rawOutput = sh(
+            script: '''#!/usr/bin/env bash
+              set -euo pipefail
+              umask 077
+              { set +x; } 2>/dev/null
+              mongosh "$MONGO_URI" --quiet \
+                --eval 'db.getMongo().setReadPref("primary")' \
+                --eval 'print(db.getSiblingDB("hourtimesheet").auditEventLog.countDocuments({correlationId: process.env.MONGOSH_CORR_ID}))'
+            '''.stripIndent(),
+            returnStdout: true,
+            label: 'post-apply audit-row probe (issue #17)',
+        )
+      }
+    }
+  } catch (Throwable t) {
+    error(
+      "Post-apply audit-row probe (issue #17) FAILED to execute for " +
+      "correlationId=${correlationId} ticket=${cfg.ticketId} tenant=${cfg.companyNameTrimmed}: " +
+      "${t.class.simpleName}: ${t.message}. " +
+      "The apply itself reported status=applied; the audit-row contract is " +
+      "now UNVERIFIED. Investigate Mongo connectivity and the auditEventLog row " +
+      "manually before declaring this build complete. To bypass during a confirmed " +
+      "Mongo outage set cfg.skipPostApplyProbe=true on the consumer Jenkinsfile."
+    )
+  }
+
+  // Find the last all-digits line; mongosh banners / connection notices may
+  // print preamble even with --quiet on some driver versions.
+  def countLine = null
+  for (String line : (rawOutput ?: '').split('\\r?\\n')) {
+    def trimmed = line?.trim()
+    if (trimmed && trimmed ==~ /\d+/) {
+      countLine = trimmed
+    }
+  }
+  if (countLine == null) {
+    error(
+      "Post-apply audit-row probe (issue #17) returned no integer count for " +
+      "correlationId=${correlationId} ticket=${cfg.ticketId} tenant=${cfg.companyNameTrimmed}. " +
+      "Raw mongosh output:\n----\n${rawOutput}\n----\n" +
+      "The audit-row contract is UNVERIFIED. Investigate."
+    )
+  }
+  def count = countLine as int
+  if (count == 0) {
+    error(
+      "Audit-row contract violation (issue #17): no auditEventLog row found for " +
+      "correlationId=${correlationId} after status=applied. " +
+      "Ticket=${cfg.ticketId} tenant=${cfg.companyNameTrimmed}. " +
+      "Consumer mongosh.js may have failed to write the audit row in the same " +
+      "transaction as the data write. Investigate Mongo state and the consumer " +
+      "script's audit-row write path before re-running."
+    )
+  }
+  if (count > 1) {
+    error(
+      "Audit-row contract violation (issue #17): ${count} duplicate auditEventLog rows " +
+      "found for correlationId=${correlationId} (expected exactly 1). " +
+      "Ticket=${cfg.ticketId} tenant=${cfg.companyNameTrimmed}. " +
+      "Consumer mongosh.js wrote the audit row more than once — investigate the " +
+      "script's audit-row write path before re-running."
+    )
+  }
+  log.info(
+    "Audit row VERIFIED for correlationId=${correlationId} " +
+    "(ticket=${cfg.ticketId}, tenant=${cfg.companyNameTrimmed}). " +
+    "Audit-row contract upheld (issue #17)."
+  )
 }
 
 /**

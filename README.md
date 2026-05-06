@@ -321,6 +321,63 @@ The pipeline ALSO writes a Jenkins-side audit artifact (a JSON line under
 build artefacts so you can reconstruct the full history from Jenkins alone if
 the Mongo write fails.
 
+#### Post-apply probe — enforcing the audit-row contract (issue #17)
+
+Pre-#17, the contract that every `RESULT_JSON status=applied` produces
+**exactly one** `auditEventLog` row with the matching `correlationId` was
+documentation-only. A consumer `.mongosh.js` that wrote the data but skipped
+the audit row (bug, schema typo, network glitch mid-write) would still report
+success — Mongo silently lacked the forensic record, and you'd only discover
+it later from a missing forensics search.
+
+The Apply stage now runs a tiny **post-apply probe** immediately after the
+`appliedMarker` check passes:
+
+```bash
+mongosh "$MONGO_URI" --quiet \
+  --eval 'db.getMongo().setReadPref("primary")' \
+  --eval 'print(db.getSiblingDB("hourtimesheet").auditEventLog
+                  .countDocuments({correlationId: process.env.MONGOSH_CORR_ID}))'
+```
+
+Expected output is the integer `1`. The build fails on:
+
+| Count   | Diagnosis                                                              | Build outcome |
+| ------- | ---------------------------------------------------------------------- | ------------- |
+| `0`     | Consumer mongosh.js did NOT write the audit row.                       | FAIL with correlationId in error |
+| `>1`    | Same correlationId written multiple times (broken consumer).           | FAIL with duplicate diagnostic   |
+| `1`     | Contract upheld — audit row present.                                   | INFO `Audit row VERIFIED ...`    |
+
+Implementation notes:
+
+* The probe runs ONLY on `status=applied` — never on noop / dry-run / failed.
+* The probe runs ONLY when the apply itself just reported `appliedMarker`.
+* `correlationId` is passed via the `MONGOSH_CORR_ID` env var and read from
+  inside the eval JS as `process.env.MONGOSH_CORR_ID`. It is **never**
+  interpolated into the shell command or the `--eval` JS string. The id is
+  built from `BUILD_TAG` (issue #16), which contains `JOB_NAME` — partially
+  user-controlled — so any string-interpolation path would be a shell / JS
+  injection surface. Env-var indirection is the safe pattern.
+* `setReadPref("primary")` is set first via `--eval`, mirroring the apply-
+  side `_runMongosh` hardening (issue #24): the probe never reads from a
+  stale secondary while verifying a just-committed write.
+* Probe execution failures (mongosh missing, primary unreachable, malformed
+  URI) fail the build. Soft-fail would defeat the P1 contract enforcement —
+  operators with a justified reason to bypass set `cfg.skipPostApplyProbe =
+  true`.
+* `cfg.skipPostApplyProbe` (default `false`) is an emergency override for
+  Mongo-outage scenarios where the apply committed but the read-side primary
+  is unreachable (post-write failover, etc.). When set, the probe is skipped
+  with a WARN log; the operator must verify the audit row manually in Mongo
+  before declaring the build complete. **Use sparingly and only with explicit
+  on-call sign-off.**
+
+**Backward compatibility:** the existing HK-2204..HK-2209 consumer
+`.mongosh.js` scripts already write the audit row in the same transaction as
+the data write (the canonical skeleton above). They pass the probe as-is — no
+consumer-side change is required. New consumers MUST follow the same skeleton
+or the build will fail loudly (which is the point of #17).
+
 ### Status of truth (issue #14)
 
 The **canonical** sources of truth for what a build did are:
@@ -360,6 +417,7 @@ dry-run and a real write. Three knobs harden it:
 | `approverGroup`        | `null`  | If set, restricts the input step's `submitter:` to the named Jenkins user / group (e.g. `'hts-oncall'`). Anyone else who clicks "Apply" is rejected.     |
 | `requireDualApproval`  | `false` | Adds a SECOND input step that requires a different submitter from the first. The apply aborts if both gates were approved by the same person.            |
 | `allowMongoshPrerelease` | `false` | Pre-flight refuses pre-release `mongosh` builds (`-rc.*`, `-beta`, `-alpha.*`) by default — driver semantics may differ from GA. Opt in only on a non-prod tenant when knowingly testing a candidate build (issue #13). |
+| `skipPostApplyProbe`   | `false` | Skip the post-apply audit-row probe (issue #17). The probe enforces the documented contract that every `status=applied` produces exactly one `auditEventLog` row matching `correlationId`. Set to `true` ONLY as an emergency override during a Mongo outage where the apply committed but the read-side primary is unreachable; the operator must then verify the row manually. |
 
 Use `requireDualApproval = true` for high-risk tickets (mass updates, deletes,
 financial-impact writes). Single-tenant single-toggle changes can stay on the
@@ -450,6 +508,7 @@ htsSupportJob {
   requireDualApproval  = false                     // require two distinct approvers
   confirmTenantName    = true                      // operator must retype tenant slug at the input gate
   allowMongoshPrerelease = false                   // accept mongosh pre-release builds (-rc/-beta/-alpha)? default false
+  skipPostApplyProbe   = false                     // emergency override: skip the issue #17 audit-row probe (Mongo outage only)
   onApply              = null                      // closure invoked on apply success
   onFailure            = null                      // closure invoked on apply failure / abort
 
@@ -484,7 +543,11 @@ htsSupportJob {
    dual-approval second gate. Captures the submitter for the audit trail.
 6. **Apply** — only when `APPLY=true` and not a no-op (15-minute timeout).
    Runs `.mongosh.js` again with `APPLY=true` and `OPERATOR=<submitter>`.
-   Aborts if `appliedMarker` is not in the log.
+   Aborts if `appliedMarker` is not in the log. **After `appliedMarker`
+   passes**, a post-apply probe queries Mongo for an `auditEventLog` row
+   matching the run's `correlationId`; the build fails if exactly one row
+   is not present (issue #17). `cfg.skipPostApplyProbe = true` is an
+   emergency override for Mongo-outage scenarios.
 7. **Audit (`post.always`)** — writes a JSON-line audit artefact to
    `.htsSupportJob/<buildNumber>/<ticketId>-audit.log` REGARDLESS of pipeline
    outcome (success, failure, abort). The line carries the same

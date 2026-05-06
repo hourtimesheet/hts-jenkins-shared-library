@@ -116,6 +116,26 @@ class SupportJobConfig implements Serializable {
    */
   boolean allowMongoshPrerelease = false
 
+  /**
+   * Issue #17: post-apply audit-row probe.
+   *
+   * After the {@code .mongosh.js} returns {@code RESULT_JSON status=applied},
+   * the Apply stage runs a tiny mongosh probe that asserts EXACTLY ONE
+   * {@code auditEventLog} row exists with the run's {@code correlationId}.
+   * !=1 fails the build.
+   *
+   * Defaults to {@code false} — the probe ALWAYS runs by default, enforcing
+   * the audit-row contract that was previously documentation-only.
+   *
+   * Set to {@code true} ONLY as an emergency override during a Mongo outage
+   * where the apply itself committed but the read-side probe cannot complete
+   * (e.g. primary unreachable for reads after a write-and-failover). The
+   * canonical audit trail still lives in Mongo's {@code auditEventLog}; this
+   * flag only suppresses the post-apply verification, not the consumer
+   * mongosh.js's audit-row write.
+   */
+  boolean skipPostApplyProbe = false
+
   // --- Notification hooks (audit finding M9) ---
   /**
    * Optional Jenkins-pipeline closure invoked from {@code post.success} after
