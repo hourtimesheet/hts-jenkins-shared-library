@@ -479,4 +479,144 @@ class SupportJobConfigSpec extends Specification {
     expect:
     cfg.validate() == null
   }
+
+  // ------------------------------------------------------------------
+  // Issue #10: decommission story — deprecated flag, freeze date, and
+  // freezeBlocksNoop gating the noop path. validate() catches misconfig
+  // at config-construction time so an operator never triggers a build
+  // with a malformed freeze date.
+  // ------------------------------------------------------------------
+  def "default deprecated is false (issue #10)"() {
+    expect:
+    new SupportJobConfig().deprecated == false
+  }
+
+  def "default deprecatedMessage is null (issue #10)"() {
+    expect:
+    new SupportJobConfig().deprecatedMessage == null
+  }
+
+  def "default freezeAfter is null (no freeze configured, issue #10)"() {
+    expect:
+    new SupportJobConfig().freezeAfter == null
+  }
+
+  def "default freezeBlocksNoop is false (noop allowed after freeze, issue #10)"() {
+    expect:
+    new SupportJobConfig().freezeBlocksNoop == false
+  }
+
+  def "validate() accepts deprecated=true with no message (uses fallback at runtime, issue #10)"() {
+    given:
+    def cfg = validConfig()
+    cfg.deprecated = true
+
+    expect:
+    cfg.validate() == null
+  }
+
+  def "validate() accepts deprecated=true with a clean message (issue #10)"() {
+    given:
+    def cfg = validConfig()
+    cfg.deprecated = true
+    cfg.deprecatedMessage = 'Migrating to the platform-tools UI on 2026-08-01'
+
+    expect:
+    cfg.validate() == null
+  }
+
+  @Unroll
+  def "validate() rejects deprecatedMessage containing control char '#desc' (issue #10)"() {
+    given:
+    def cfg = validConfig()
+    cfg.deprecatedMessage = 'See ' + ch + ' migration doc'
+
+    expect:
+    cfg.validate()?.contains('deprecatedMessage')
+
+    where:
+    desc        | ch
+    'newline'   | '\n'
+    'CR'        | '\r'
+    'tab'       | '\t'
+    'NUL'       | '\u0000'
+    'DEL'       | '\u007f'
+    'bell'      | '\u0007'
+  }
+
+  def "validate() accepts a future freezeAfter date (issue #10)"() {
+    given:
+    def cfg = validConfig()
+    cfg.freezeAfter = '2999-12-31'
+
+    expect:
+    cfg.validate() == null
+  }
+
+  def "validate() accepts a past freezeAfter date — runtime gate, not config gate (issue #10)"() {
+    // A past date is valid config: the consumer Jenkinsfile is now in a
+    // post-freeze state and runs will be refused at apply time. validate()
+    // does not refuse past dates because that's the entire point of the
+    // four-stage retirement (deprecate -> freeze apply -> freeze noop -> remove).
+    given:
+    def cfg = validConfig()
+    cfg.freezeAfter = '2000-01-01'
+
+    expect:
+    cfg.validate() == null
+  }
+
+  @Unroll
+  def "validate() rejects malformed freezeAfter '#bad' (issue #10)"() {
+    given:
+    def cfg = validConfig()
+    cfg.freezeAfter = bad
+
+    when:
+    def err = cfg.validate()
+
+    then:
+    err != null
+    err.contains('freezeAfter')
+
+    where:
+    bad << [
+      '',                  // blank
+      '   ',               // whitespace only
+      '2026',              // year only
+      '2026-08',           // year-month only
+      '2026/08/01',        // wrong separator
+      '08-01-2026',        // US format
+      '2026-08-01T00:00',  // datetime not date
+      '2026-13-01',        // month 13 — shape regex passes, strict parse rejects
+      '2026-02-30',        // Feb 30 — shape regex passes, strict parse rejects
+      'tomorrow',          // not a date
+      '2026-8-1',          // single-digit month/day
+    ]
+  }
+
+  def "validate() rejects freezeBlocksNoop=true with no freezeAfter (issue #10)"() {
+    given:
+    def cfg = validConfig()
+    cfg.freezeBlocksNoop = true
+    cfg.freezeAfter = null
+
+    when:
+    def err = cfg.validate()
+
+    then:
+    err != null
+    err.contains('freezeBlocksNoop')
+    err.contains('freezeAfter')
+  }
+
+  def "validate() accepts freezeBlocksNoop=true when freezeAfter is set (issue #10)"() {
+    given:
+    def cfg = validConfig()
+    cfg.freezeBlocksNoop = true
+    cfg.freezeAfter = '2026-08-01'
+
+    expect:
+    cfg.validate() == null
+  }
 }

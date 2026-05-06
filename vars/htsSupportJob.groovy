@@ -1,5 +1,6 @@
 import static groovy.lang.Closure.DELEGATE_ONLY
 
+import com.hourtimesheet.jenkins.FreezeGate
 import com.hourtimesheet.jenkins.SupportJobConfig
 
 /**
@@ -109,6 +110,15 @@ void call(Closure closure) {
             _ctxStore.applyStatus   = null
 
             log.info("Correlation ID: ${_ctxStore.correlationId}")
+
+            // Issue #10: deprecation banner. Emitted at Bootstrap so every
+            // operator sees it before paging through the dry-run output. The
+            // banner is informational ONLY — it does NOT block runs. Use
+            // cfg.freezeAfter for hard refusal.
+            if (cfg.deprecated) {
+              def msg = cfg.deprecatedMessage?.trim() ?: 'This pipeline is deprecated.'
+              log.warn("⚠️ DEPRECATED: ${msg}")
+            }
           }
         }
       }
@@ -368,6 +378,14 @@ void call(Closure closure) {
 final Map<String, Object> _ctxStore = new LinkedHashMap<String, Object>()
 
 private void _runDryRun(SupportJobConfig cfg) {
+  // Issue #10: freeze gate for the noop / dry-run path. Only fires when
+  // cfg.freezeBlocksNoop=true AND today (UTC) >= cfg.freezeAfter — otherwise
+  // the dry-run path stays available for last-look forensics after retirement.
+  // Date comparison logic in src/.../FreezeGate so it's unit-testable without
+  // a Jenkins runtime.
+  if (cfg.freezeBlocksNoop && FreezeGate.isFrozen(cfg.freezeAfter)) {
+    error(FreezeGate.errorMessage(cfg.ticketId, cfg.freezeAfter, cfg.freezeBlocksNoop))
+  }
   timeout(time: 5, unit: 'MINUTES') {
     // Logs live in the workspace so archiveArtifacts (which uses workspace-
     // relative Ant globs) can pick them up. Build-numbered subdir prevents
@@ -481,6 +499,16 @@ private void _runConfirm(SupportJobConfig cfg) {
 private void _runApply(SupportJobConfig cfg) {
   if (!cfg.APPLY || _ctxStore.isNoop) {
     return
+  }
+  // Issue #10: hard freeze gate for the apply path. Runs AFTER the operator
+  // submits the Confirm input step (per "the Apply button input still
+  // appears, but on submit, the job throws") so the operator gets a clear
+  // error rather than a silently missing stage. The dry-run / noop path
+  // remains available unless cfg.freezeBlocksNoop=true (gated in _runDryRun).
+  // Date comparison logic in src/.../FreezeGate so it's unit-testable
+  // without a Jenkins runtime.
+  if (FreezeGate.isFrozen(cfg.freezeAfter)) {
+    error(FreezeGate.errorMessage(cfg.ticketId, cfg.freezeAfter, cfg.freezeBlocksNoop))
   }
   timeout(time: 15, unit: 'MINUTES') {
     def applyLog = ".htsSupportJob/${env.BUILD_NUMBER}/${cfg.ticketId}-apply.log"
