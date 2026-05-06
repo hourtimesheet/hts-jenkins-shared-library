@@ -556,7 +556,13 @@ private void _runMongosh(SupportJobConfig cfg, String outLog, boolean applyMode,
         # Suppress xtrace specifically around the mongosh line so the URI is
         # not echoed even if Jenkins ran the script with -x.
         { set +x; } 2>/dev/null
-        mongosh "$MONGO_URI" --quiet --file "$WORKSPACE/$HTS_SUPPORT_SCRIPT" 2>&1 | tee "$WORKSPACE/$HTS_SUPPORT_OUT_LOG"
+        # --eval runs BEFORE --file, so setReadPref applies to the script's
+        # session. Belt-and-suspenders: even if the URI from the credential
+        # drifts (or omits readPreference=primary), mongosh enforces primary
+        # reads for the dry-run pre-count, apply-time recheck, destructive
+        # writes, and post-write verify. Tracks
+        # hourtimesheet/hts-company-onboarding-pipeline-script#24 (audit F-Low-1).
+        mongosh "$MONGO_URI" --quiet --eval 'db.getMongo().setReadPref("primary")' --file "$WORKSPACE/$HTS_SUPPORT_SCRIPT" 2>&1 | tee "$WORKSPACE/$HTS_SUPPORT_OUT_LOG"
       '''
     }
   }
