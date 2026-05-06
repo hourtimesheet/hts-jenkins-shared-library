@@ -69,9 +69,15 @@ class CorrelationIdSpec extends Specification {
     given:
     def src = supportJobSource()
 
+    // The exact line that collided on Replay before the fix. We search the
+    // whole source as a single string — find() returns false if the pattern
+    // never appears, which is what we want.
+    def regressedA = Pattern.compile(/env\.BUILD_TAG\s*\?:\s*java\.util\.UUID\.randomUUID\(\)\.toString\(\)\s*$/, Pattern.MULTILINE)
+    def regressedB = Pattern.compile(/env\.BUILD_TAG\s*\?:\s*UUID\.randomUUID\(\)\s*$/, Pattern.MULTILINE)
+
     expect: 'the bare ?: form that collided on Replay is gone'
-    !(src =~ /env\.BUILD_TAG\s*\?:\s*java\.util\.UUID\.randomUUID\(\)\.toString\(\)\s*$/m)
-    !(src =~ /env\.BUILD_TAG\s*\?:\s*UUID\.randomUUID\(\)\s*$/m)
+    !regressedA.matcher(src).find()
+    !regressedB.matcher(src).find()
   }
 
   // --------------------------------------------------------------------
