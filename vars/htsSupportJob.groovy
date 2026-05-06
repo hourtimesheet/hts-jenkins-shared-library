@@ -536,8 +536,11 @@ private String _resolveUserId(String submitter) {
     return submitter
   }
   try {
-    def jenkins = jenkins.model.Jenkins.get()
-    def realm = jenkins?.getSecurityRealm()
+    // Fully-qualified to avoid sandbox confusion and to be obvious to readers.
+    // Local var is named `jenkinsInstance` (not `jenkins`) so it does not shadow
+    // the `jenkins.model` package on the RHS at parse time.
+    def jenkinsInstance = jenkins.model.Jenkins.get()
+    def realm = jenkinsInstance?.getSecurityRealm()
     if (realm == null) {
       log.warn("SecurityRealm unavailable; falling back to raw submitter '${submitter}' for userId comparison (issue #15)")
       return submitter
