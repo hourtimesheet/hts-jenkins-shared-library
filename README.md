@@ -566,17 +566,16 @@ green `./gradlew test` run plus a sentinel-tenant smoke job to lean on.)
 ./gradlew check           # test + assemble
 ```
 
-The unit suite uses [Spock](https://spockframework.org/) and exercises
-`SupportJobConfig` exhaustively (regex edges, reserved-key collisions, multi-
-error accumulation, control-char rejection in reason / extraEnv values).
-Pipeline-shape behaviour — the declarative `pipeline { ... }`,
-`withCredentials`, `input`, `archiveArtifacts`, the `lock`, the post hooks —
-is verified manually in Jenkins (see *Manual test plan* above) because
-[JenkinsPipelineUnit](https://github.com/jenkinsci/JenkinsPipelineUnit) cannot
-fully evaluate a declarative pipeline today and a half-mocked test would lock
-us into JPU's particular shape. We'll add JPU coverage when JPU's declarative
-support matures or when we factor more logic out of the declarative block into
-plain Groovy methods.
+The unit suite uses [Spock](https://spockframework.org/) exclusively today and
+exercises `SupportJobConfig` exhaustively (regex edges, reserved-key
+collisions, multi-error accumulation, control-char rejection in reason /
+extraEnv values). Pipeline-shape behaviour — the declarative
+`pipeline { ... }`, `withCredentials`, `input`, `archiveArtifacts`, the
+`lock`, the post hooks — is verified manually in Jenkins (see *Manual test
+plan* above). Adding a pipeline-shape test framework (e.g.
+[JenkinsPipelineUnit](https://github.com/jenkinsci/JenkinsPipelineUnit)) is
+deferred until its declarative-pipeline support matures or we factor more
+logic out of the declarative block into plain Groovy methods.
 
 CI runs the same Spock suite under JDK 11 (matching the Jenkins controller
 toolchain) on every push and PR, with the Gradle wrapper JAR validated against
