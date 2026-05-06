@@ -587,9 +587,10 @@ plan* above). Adding a pipeline-shape test framework (e.g.
 deferred until its declarative-pipeline support matures or we factor more
 logic out of the declarative block into plain Groovy methods.
 
-CI runs the same Spock suite under JDK 11 (matching the Jenkins controller
-toolchain) on every push and PR, with the Gradle wrapper JAR validated against
-its published checksum and the Gradle distribution pinned by SHA-256.
+CI runs the same Spock suite under JDK 17 (matching the Jenkins 2.452+
+controller baseline) on every push and PR, with the Gradle wrapper JAR
+validated against its published checksum and the Gradle distribution pinned
+by SHA-256.
 
 ---
 
