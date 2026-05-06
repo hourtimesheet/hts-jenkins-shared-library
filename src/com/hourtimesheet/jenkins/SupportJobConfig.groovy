@@ -16,6 +16,35 @@ class SupportJobConfig implements Serializable {
   private static final long serialVersionUID = 1L
 
   /**
+   * Issue #8: schema version for the JSON-line audit-log artifact written under
+   * {@code .htsSupportJob/${BUILD_NUMBER}/${ticketId}-audit.log}.
+   *
+   * Every JSONL row carries this value as {@code schema_version} so downstream
+   * consumers (log shippers, SIEM rules, future ingestion jobs, forensic
+   * tooling) can detect schema changes and adapt — or refuse to ingest unknown
+   * major versions.
+   *
+   * <h3>Migration policy</h3>
+   * Bump this constant when, AND ONLY when, you make a backwards-incompatible
+   * change to the audit-row shape:
+   * <ul>
+   *   <li>a required field is renamed or removed,</li>
+   *   <li>a required field's type changes (string -> int, scalar -> object),</li>
+   *   <li>the meaning of an existing field changes in a way consumers must
+   *       handle (e.g. enum value semantics, units).</li>
+   * </ul>
+   * Adding a new <i>optional</i> field is a non-breaking change — keep the
+   * version, document the field as optional in README. Adding a new <i>required</i>
+   * field IS a breaking change for consumers that filter on field presence;
+   * bump the version.
+   *
+   * Consumers SHOULD reject unknown major versions and SHOULD log a warning on
+   * any unknown minor; we keep this an integer (not a semver triple) because
+   * the audit log has only ever had a "major" contract.
+   */
+  static final int AUDIT_SCHEMA_VERSION = 1
+
+  /**
    * Tenant-slug regex.
    *
    * Source-of-truth: tenant slugs are stored in {@code masterConfiguration._id}
