@@ -211,6 +211,20 @@ class SupportJobConfig implements Serializable {
     if (!appliedMarker) errors << "appliedMarker must not be empty"
     if (!fatalMarker)   errors << "fatalMarker must not be empty"
 
+    // Issue #15: dual-approval defense in depth. submitterParameter may return
+    // a display name rather than a userId; two accounts sharing a display name
+    // would defeat the dual-approval string compare. The runtime fix in
+    // htsSupportJob.groovy normalizes both submitters via the SecurityRealm,
+    // but realm lookups can fall back to raw strings in degraded conditions.
+    // approverGroup constrains the submitter to a known group at the input
+    // step, narrowing realm semantics so the fallback path remains safe.
+    // Reject the misconfiguration at config-construction time rather than
+    // letting an operator deploy a job whose dual-approval is silently weaker
+    // than intended.
+    if (requireDualApproval && !approverGroup?.trim()) {
+      errors << "approverGroup MUST be set when requireDualApproval=true (issue #15: prevents userId/displayName collisions on the dual-approval gate)"
+    }
+
     return errors.isEmpty() ? null : "htsSupportJob configuration invalid:\n  - " + errors.join("\n  - ")
   }
 

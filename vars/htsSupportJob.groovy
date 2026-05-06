@@ -389,14 +389,25 @@ private void _runConfirm(SupportJobConfig cfg) {
       }
       def secondConfirmation = input(secondArgs)
       def submitterB = secondConfirmation.submitter ?: 'unknown'
-      if (submitterB == submitterA) {
+      // Issue #15: Jenkins's submitterParameter may return a display name
+      // ("David Allison") rather than the canonical userId ("dallison"),
+      // depending on the active SecurityRealm. Two distinct accounts that
+      // share a display name would defeat dual-approval. Normalize both
+      // values via the realm to the canonical userId before comparing.
+      //
+      // Defense in depth: SupportJobConfig.validate() now also requires
+      // approverGroup to be set when requireDualApproval=true so the input
+      // step's group constraint narrows realm semantics.
+      def normalizedA = _resolveUserId(submitterA)
+      def normalizedB = _resolveUserId(submitterB)
+      if (normalizedB == normalizedA) {
         error(
           "Aborted: dual approval requires two distinct approvers, but '${submitterA}' " +
-          "approved both gates. Have a different operator confirm."
+          "(userId '${normalizedA}') approved both gates. Have a different operator confirm."
         )
       }
       _ctxStore.secondSubmitter = submitterB
-      log.info("Dual approval: primary=${submitterA}, secondary=${submitterB}")
+      log.info("Dual approval: primary=${submitterA} (userId=${normalizedA}), secondary=${submitterB} (userId=${normalizedB})")
     }
   }
 }
@@ -497,6 +508,55 @@ private String _jsonEncode(Object v) {
   }
   sb.append('"')
   return sb.toString()
+}
+
+/**
+ * Normalizes a submitter string returned by Jenkins's {@code submitterParameter}
+ * to the canonical {@code userId} via the active {@code SecurityRealm}.
+ *
+ * Issue #15: {@code submitterParameter} may yield either a userId or a display
+ * name depending on the realm. Two distinct user accounts that share a display
+ * name (e.g. two "David Allison"s) would compare as equal and silently defeat
+ * dual-approval. Resolving via {@code loadUserByUsername(...)} returns the
+ * canonical {@code User.id} regardless of which form Jenkins handed us.
+ *
+ * Failure modes (e.g. realm is a stub in unit tests, lookup throws because the
+ * name does not exist, sandbox blocks the call) fall back to the raw input
+ * string so legitimate runs are not blocked. The fallback is logged as a
+ * warning — never silently swallowed — so a security-relevant misconfiguration
+ * (realm offline, sandbox preventing lookup) surfaces in the build log and the
+ * audit trail.
+ *
+ * The collision risk during fallback is the SAME as today's pre-fix behaviour
+ * (string compare on whatever Jenkins returned), so we do not regress; we only
+ * improve.
+ */
+private String _resolveUserId(String submitter) {
+  if (submitter == null || submitter.trim().isEmpty() || submitter == 'unknown') {
+    return submitter
+  }
+  try {
+    def jenkins = jenkins.model.Jenkins.get()
+    def realm = jenkins?.getSecurityRealm()
+    if (realm == null) {
+      log.warn("SecurityRealm unavailable; falling back to raw submitter '${submitter}' for userId comparison (issue #15)")
+      return submitter
+    }
+    def userDetails = realm.loadUserByUsername(submitter)
+    def resolved = userDetails?.getUsername()
+    if (resolved == null || resolved.trim().isEmpty()) {
+      log.warn("SecurityRealm returned empty userId for '${submitter}'; falling back to raw value (issue #15)")
+      return submitter
+    }
+    return resolved
+  } catch (Throwable t) {
+    // Catch Throwable (not just Exception) because realm impls in some Jenkins
+    // versions throw UsernameNotFoundException (a checked subclass of
+    // RuntimeException via Spring), and the sandbox can throw RejectedAccessException
+    // which is a SecurityException. Either way we log and fall back.
+    log.warn("SecurityRealm.loadUserByUsername('${submitter}') failed (${t.class.simpleName}: ${t.message}); falling back to raw value for userId comparison (issue #15)")
+    return submitter
+  }
 }
 
 private Map<String, Object> _hookPayload(SupportJobConfig cfg, String status) {
