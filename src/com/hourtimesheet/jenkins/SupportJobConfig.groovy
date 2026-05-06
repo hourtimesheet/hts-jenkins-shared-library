@@ -137,8 +137,14 @@ class SupportJobConfig implements Serializable {
 
     if (!ticketId?.trim()) {
       errors << "ticketId is required (e.g. 'HK-2204')"
-    } else if (!(ticketId ==~ /[A-Z0-9][A-Z0-9-]{2,31}/)) {
-      errors << "ticketId '${ticketId}' must match [A-Z0-9][A-Z0-9-]{2,31} (e.g. 'HK-2204')"
+    } else if (!(ticketId ==~ /^[A-Z]{2,6}-[0-9]{2,6}$/)) {
+      // Tightened from `[A-Z0-9][A-Z0-9-]{2,31}` (audit finding L3, issue #4).
+      // Old pattern accepted shapes like `A1-B2-C3`, `12-345-678`, `H-K-2-2-0-4`.
+      // New pattern enforces the canonical Jira key shape used across our pipelines:
+      //   - 2-6 uppercase letters, single hyphen, 2-6 digits; full-string match.
+      //   - Examples accepted: 'HK-2204', 'SUPP-123456', 'AB-12'.
+      //   - Examples rejected: 'hk-2204' (case), 'H-2204' (1 letter), 'HK2204' (no hyphen).
+      errors << "ticketId '${ticketId}' must match [A-Z]{2,6}-[0-9]{2,6} (e.g. 'HK-2204')"
     }
 
     if (!companyName?.trim()) {
