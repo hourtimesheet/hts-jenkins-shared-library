@@ -160,7 +160,7 @@ class SupportJobConfigSpec extends Specification {
   }
 
   @Unroll
-  def "validate() rejects ticketId '#tid'"() {
+  def "validate() rejects ticketId '#tid' (issue #4 — tightened regex)"() {
     given:
     def cfg = validConfig()
     cfg.ticketId = tid
@@ -169,7 +169,48 @@ class SupportJobConfigSpec extends Specification {
     cfg.validate()?.contains('ticketId')
 
     where:
-    tid << ['hk-2204', 'HK', 'HK 2204', '', null]
+    tid << [
+      // Pre-existing rejection cases
+      'hk-2204',         // lowercase
+      'HK',              // no hyphen / digits
+      'HK 2204',         // embedded space
+      '',                // empty
+      null,              // null
+      // Issue #4 additions: shapes that the OLD `[A-Z0-9][A-Z0-9-]{2,31}` regex
+      // accepted but that aren't real Jira keys.
+      'H-2204',          // 1 letter (need 2-6)
+      'HKKKKKKK-2204',   // 8 letters (>6)
+      'HK-',             // no digits
+      'HK-1',            // 1 digit (need 2-6)
+      'HK-1234567',      // 7 digits (>6)
+      'HK2204',          // missing hyphen
+      'HK-2204X',        // trailing junk
+      'HK-2204-X',       // trailing -X
+      'A1-B2-C3',        // alphanumeric letter-block (old regex accepted this)
+      '12-345-678',      // digits-only with extra hyphens
+      'H-K-2-2-0-4',     // dotted form (old regex accepted this)
+      ' HK-2204',        // leading space
+      'HK-2204 ',        // trailing space
+    ]
+  }
+
+  @Unroll
+  def "validate() accepts ticketId '#tid' (issue #4 — canonical Jira shape)"() {
+    given:
+    def cfg = validConfig()
+    cfg.ticketId = tid
+
+    expect:
+    cfg.validate() == null
+
+    where:
+    tid << [
+      'HK-2204',         // canonical example from the codebase
+      'HK-220456',       // 6 digits (upper bound)
+      'AB-12',           // 2 letters + 2 digits (lower bound)
+      'ABCDEF-123456',   // 6 letters + 6 digits (upper bound)
+      'SUPP-123',        // typical support-team prefix
+    ]
   }
 
   def "validate() rejects mongoScriptFile with path traversal"() {
