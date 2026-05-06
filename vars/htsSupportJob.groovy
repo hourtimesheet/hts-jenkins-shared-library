@@ -89,7 +89,12 @@ void call(Closure closure) {
             _ctxStore.wasApplied    = false
             _ctxStore.submitter     = env.BUILD_USER ?: 'unknown'
             _ctxStore.secondSubmitter = ''
-            _ctxStore.correlationId = env.BUILD_TAG ?: java.util.UUID.randomUUID().toString()
+            // Jenkins 'Replay' shares BUILD_TAG with its parent build, which
+            // would collide correlationIds across two distinct physical writes
+            // (issue #16). Append BUILD_NUMBER + an 8-char random suffix
+            // unconditionally so every run — original or Replay — gets a
+            // unique id, while keeping BUILD_TAG as the human-readable prefix.
+            _ctxStore.correlationId = "${env.BUILD_TAG ?: 'jenkins'}-${env.BUILD_NUMBER ?: '0'}-${java.util.UUID.randomUUID().toString().take(8)}"
             _ctxStore.applyStatus   = null
 
             log.info("Correlation ID: ${_ctxStore.correlationId}")
