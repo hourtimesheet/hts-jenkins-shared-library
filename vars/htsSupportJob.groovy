@@ -1,5 +1,7 @@
 import static groovy.lang.Closure.DELEGATE_FIRST
 
+import groovy.transform.Field
+
 import com.hourtimesheet.jenkins.FreezeGate
 import com.hourtimesheet.jenkins.SupportJobConfig
 
@@ -381,6 +383,17 @@ void call(Closure closure) {
  *   - correlationId:   (String)  tying Jenkins audit log to .mongosh.js auditEventLog row
  *   - applyStatus:     (String)  null | 'applied' | 'failed' | 'aborted'
  */
+// @Field is REQUIRED here. In a Jenkins shared-library `vars/*.groovy` file,
+// a bare top-level `def`/`final` declaration (without @Field) compiles to a
+// local variable of the implicit `run()` method — invisible to closures the
+// script instantiates (the entire `pipeline { … }` DSL block runs as such a
+// closure). With @Field, _ctxStore becomes an instance field of the Script
+// class and is reachable from `call()`, the pipeline block, every nested
+// `script { }` step, and the helper `_runDryRun` / `_runApply` / `_audit`
+// methods that mutate it. Without @Field: `MissingPropertyException: No such
+// property: _ctxStore for class: htsSupportJob` at the first Bootstrap step
+// (goodhelp-ai/goodhelp#4132 build #9).
+@Field
 @SuppressWarnings('GroovyUnusedDeclaration')
 final Map<String, Object> _ctxStore = new LinkedHashMap<String, Object>()
 
