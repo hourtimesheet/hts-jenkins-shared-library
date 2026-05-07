@@ -4,7 +4,9 @@ package com.hourtimesheet.jenkins
  * Typed configuration for {@code htsSupportJob}.
  *
  * Populated by binding the consumer's DSL closure with
- * {@code resolveStrategy = DELEGATE_ONLY} and {@code delegate = new SupportJobConfig()}.
+ * {@code resolveStrategy = DELEGATE_FIRST} and {@code delegate = new SupportJobConfig()}.
+ * (DELEGATE_FIRST — not DELEGATE_ONLY — so consumers can also read Jenkins
+ * build inputs via {@code params.companyName} from the script binding.)
  * Validation happens once via {@link #validate()} so the failure message is single-shot
  * and lists every problem rather than dribbling errors out one at a time.
  *

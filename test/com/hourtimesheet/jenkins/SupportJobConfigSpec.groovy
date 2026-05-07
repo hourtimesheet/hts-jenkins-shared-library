@@ -619,4 +619,62 @@ class SupportJobConfigSpec extends Specification {
     expect:
     cfg.validate() == null
   }
+
+  // Regression for goodhelp-ai/goodhelp#4132 — htsSupportJob.call() must bind
+  // the consumer's closure with resolveStrategy = DELEGATE_FIRST (NOT
+  // DELEGATE_ONLY). Consumer Jenkinsfiles populate fields by bare assignment
+  // (resolves on delegate) AND read Jenkins build inputs via params.X
+  // (resolves on the script binding via owner-fallback). DELEGATE_ONLY blocks
+  // the second path with MissingPropertyException at first build.
+  def "closure binding pattern: DELEGATE_FIRST lets consumer populate cfg AND read script-binding params"() {
+    given: 'a fake script binding that exposes params (mimics Jenkins WorkflowScript)'
+    def fakeScript = new Object() {
+      Map<String, Object> params = [
+        companyName: 'acme',
+        APPLY:       false,
+        reason:      'Sales SUPP-1234 customer purchased GEP',
+      ]
+    }
+    def cfg = new SupportJobConfig()
+
+    and: 'a consumer closure mirroring the HK-22XX pipeline-script style'
+    def consumer = {
+      ticketId        = 'HK-2204'
+      companyName     = params.companyName
+      APPLY           = params.APPLY
+      reason          = params.reason
+      mongoScriptFile = 'hk-2204-add-gep.mongosh.js'
+    }
+
+    when: 'rebound with DELEGATE_FIRST as htsSupportJob.call() does'
+    def rebound = consumer.rehydrate(cfg, fakeScript, fakeScript)
+    rebound.resolveStrategy = Closure.DELEGATE_FIRST
+    rebound()
+
+    then: 'all fields populated, no MissingPropertyException'
+    cfg.ticketId        == 'HK-2204'
+    cfg.companyName     == 'acme'
+    cfg.APPLY           == false
+    cfg.reason          == 'Sales SUPP-1234 customer purchased GEP'
+    cfg.mongoScriptFile == 'hk-2204-add-gep.mongosh.js'
+    cfg.validate()      == null
+  }
+
+  def "closure binding pattern: DELEGATE_ONLY (the bug) raises MissingPropertyException for params"() {
+    given:
+    def fakeScript = new Object() {
+      Map<String, Object> params = [companyName: 'acme', APPLY: false, reason: 'why']
+    }
+    def cfg = new SupportJobConfig()
+    def consumer = { companyName = params.companyName }
+
+    when:
+    def rebound = consumer.rehydrate(cfg, fakeScript, fakeScript)
+    rebound.resolveStrategy = Closure.DELEGATE_ONLY
+    rebound()
+
+    then:
+    def ex = thrown(MissingPropertyException)
+    ex.property == 'params'
+  }
 }

@@ -1,4 +1,4 @@
-import static groovy.lang.Closure.DELEGATE_ONLY
+import static groovy.lang.Closure.DELEGATE_FIRST
 
 import com.hourtimesheet.jenkins.FreezeGate
 import com.hourtimesheet.jenkins.SupportJobConfig
@@ -49,7 +49,14 @@ void call(Closure closure) {
   def context = closure.owner as Script
 
   def cfg = new SupportJobConfig()
-  closure.resolveStrategy = DELEGATE_ONLY
+  // DELEGATE_FIRST (not DELEGATE_ONLY): consumer Jenkinsfiles populate
+  // SupportJobConfig fields by bare assignment (e.g. `companyName = X`) AND
+  // read Jenkins build inputs via `params.companyName`. DELEGATE_FIRST resolves
+  // bare field assignment against the delegate (cfg) first, then falls through
+  // to the script binding where Jenkins exposes `params`. DELEGATE_ONLY was a
+  // bug — `params` would be looked up on SupportJobConfig (which has no
+  // `params` field) and raise MissingPropertyException at first build.
+  closure.resolveStrategy = DELEGATE_FIRST
   closure.delegate = cfg
   closure()
 
