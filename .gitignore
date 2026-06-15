@@ -34,3 +34,7 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code — track agents/playbooks bundle; keep local-only files out
+.claude/settings.local.json
+.claude/sessions/
