@@ -441,13 +441,40 @@ private void _runDryRun(SupportJobConfig cfg) {
   }
 }
 
+/**
+ * Operator hint shared by every apply-gate {@code input} message and its
+ * paired console WARN.
+ *
+ * The Confirm gate carries parameters (the reviewed-preview checkbox and the
+ * tenant-name retype) plus a {@code submitterParameter}; Blue Ocean cannot
+ * submit such an {@code input} — the form silently re-renders on submit and
+ * the build never advances (HK-2205: an operator was stuck on this gate via
+ * Blue Ocean; approving from the Classic UI worked). Blue Ocean is
+ * end-of-life, so this is not fixable upstream; instead every gate points
+ * operators at the Classic UI in both the build log and the input prompt.
+ * Kept as one method so the two messages and two log lines never drift.
+ */
+private String _approveViaClassicUiHint() {
+  return "Approve from the CLASSIC Jenkins UI (open the build → 'Paused for Input', " +
+         "or use the stage-view prompt), NOT Blue Ocean — Blue Ocean cannot submit this " +
+         "confirmation form (the prompt silently re-appears on submit)."
+}
+
 private void _runConfirm(SupportJobConfig cfg) {
   if (!cfg.APPLY || _ctxStore.isNoop) {
     return
   }
   timeout(time: 60, unit: 'MINUTES') {
+    // HK-2205: Blue Ocean cannot submit the parameterized input below (the
+    // reviewed-preview checkbox + tenant retype). The form silently re-renders
+    // on submit and the build never advances. Steer the operator to the
+    // Classic UI in the console log AND in the input message itself; see
+    // _approveViaClassicUiHint for the full rationale.
+    log.warn("Paused for approval — " + _approveViaClassicUiHint() +
+             " See README › 'Approving the apply gate'.")
     def inputArgs = [
-        message: "Apply ${cfg.ticketId} for company '${cfg.companyNameTrimmed}'?",
+        message: "Apply ${cfg.ticketId} for company '${cfg.companyNameTrimmed}'?  ⚠️ " +
+                 _approveViaClassicUiHint(),
         ok: 'Apply',
         submitterParameter: 'submitter',
         parameters: [
@@ -484,13 +511,15 @@ private void _runConfirm(SupportJobConfig cfg) {
 
     if (cfg.requireDualApproval) {
       def secondArgs = [
-          message: "Dual-approval gate: a SECOND approver must confirm '${cfg.ticketId}' for '${cfg.companyNameTrimmed}'.",
+          message: "Dual-approval gate: a SECOND approver must confirm '${cfg.ticketId}' for '${cfg.companyNameTrimmed}'.  ⚠️ " +
+                   _approveViaClassicUiHint(),
           ok: 'Confirm (second approver)',
           submitterParameter: 'submitter',
       ]
       if (cfg.approverGroup) {
         secondArgs.submitter = cfg.approverGroup
       }
+      log.warn("Second approval gate — " + _approveViaClassicUiHint())
       def secondConfirmation = input(secondArgs)
       def submitterB = secondConfirmation.submitter ?: 'unknown'
       // Issue #15: Jenkins's submitterParameter may return a display name

@@ -623,6 +623,14 @@ htsSupportJob {
    with a mandatory `I_HAVE_REVIEWED_THE_PREVIEW` checkbox, an optional
    tenant-name retype, optional approver-group restriction, and optional
    dual-approval second gate. Captures the submitter for the audit trail.
+
+   > ⚠️ **Approve from the Classic UI, not Blue Ocean.** This gate is a
+   > *parameterized* `input` (checkbox + tenant retype). Blue Ocean cannot
+   > submit parameterized inputs — clicking **Apply / Proceed** silently
+   > re-renders the same form and the build never advances. Open the build in
+   > the **Classic Jenkins UI** and approve via the **"Paused for Input"**
+   > prompt (build page or stage view). See
+   > [Approving the apply gate](#approving-the-apply-gate).
 6. **Apply** — only when `APPLY=true` and not a no-op (15-minute timeout).
    When `cfg.freezeAfter` is set AND today (UTC) ≥ that date, the stage
    throws with `Apply blocked: …` immediately AFTER the operator submits
@@ -643,6 +651,37 @@ htsSupportJob {
    `.htsSupportJob/<buildNumber>/<ticketId>-*.log` so preview / apply / audit
    logs are attached to every build, then `cleanWs` clears the workspace
    subtree so per-build logs don't accumulate on the agent.
+
+---
+
+## Approving the apply gate
+
+The **Confirm** stage pauses on a *parameterized* `input` — a
+`I_HAVE_REVIEWED_THE_PREVIEW` checkbox plus (by default) a `CONFIRM_TENANT_NAME`
+retype field, and a second gate when `requireDualApproval=true`. **Approve it
+from the Classic Jenkins UI, not Blue Ocean.**
+
+**Blue Ocean cannot submit a parameterized `input`.** Clicking **Apply /
+Proceed** there silently re-renders the same form and the build never advances —
+no error, no progress. (Blue Ocean is end-of-life; this will not be fixed
+upstream.) The pipeline now prints a `⚠️` WARN to the build log and repeats the
+instruction inside the input prompt, but the fix is to approve from the Classic
+UI:
+
+1. Open the build in the **Classic UI**: `…/job/<job>/<buildNumber>/`.
+2. Approve via the **"Paused for Input"** prompt — inline in the **Console
+   Output**, or on the job's **stage view** (the Confirm stage shows the
+   prompt). Both post through the path Blue Ocean mishandles.
+3. Tick **I have reviewed the preview**, retype the tenant slug **exactly**
+   (case-sensitive; must match `companyName`), then click **Apply**.
+
+If approval **also** fails from the Classic UI, suspect a reverse-proxy / CSRF
+issue swallowing the `input` POST (Jenkins behind nginx / ALB) — an
+infrastructure fix, not a pipeline one.
+
+> First diagnosed on **HK-2205**: an operator could not get past the Confirm
+> gate via Blue Ocean (the prompt reappeared on every submit); the Classic UI
+> worked.
 
 ---
 
