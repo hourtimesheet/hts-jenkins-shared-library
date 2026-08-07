@@ -1,4 +1,4 @@
-// Lightweight ANSI logging wrappers. Mirrors LMNTL-AI's spartan/log.groovy contract.
+// Lightweight ANSI logging wrappers. Mirrors LMNTL-AI's mcs (infra-jenkins) log.groovy contract.
 //
 // All methods are no-arg-safe with null guards; ansiColor is a Jenkins step that
 // only works inside a node{} context, so the wrappers fall back to a plain echo
